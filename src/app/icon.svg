@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="WhatsApp Profile Fetcher">
+  <rect width="32" height="32" rx="8" fill="#16a34a"/>
+  <circle cx="16" cy="12" r="5" fill="#ffffff"/>
+  <path d="M8 26c1.2-5 4.8-8 8-8s6.8 3 8 8" fill="#ffffff"/>
+</svg>
