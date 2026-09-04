@@ -2,15 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { getErrorMessage, isUselessErrorMessage } from "@/lib/errors";
 import { toInternationalDigits } from "@/lib/phone";
 import {
+  type CachedProfile,
   clearProfileCache,
-  getCachedProfileUrl,
-  setCachedProfileUrl,
+  getCachedProfile,
+  isCacheComplete,
+  PROFILE_CACHE_VERSION,
+  setCachedProfile,
 } from "@/lib/profile-cache";
 import {
   ensureClientStarted,
   getStatus,
   isClientReady,
-  lookupProfilePicture,
+  lookupProfileDetails,
+  diagnoseProfileLookup,
   resetClient,
 } from "@/lib/whatsapp-client";
 
@@ -20,7 +24,7 @@ export const maxDuration = 60;
 
 const BATCH_DELAY_MS = 400;
 
-type ProfileLookupResult = {
+export type ProfileLookupResult = {
   phone: string;
   success: boolean;
   fromCache?: boolean;
@@ -29,6 +33,25 @@ type ProfileLookupResult = {
   error?: string;
   message?: string;
   resolvedPhone?: string;
+  whatsappId?: string | null;
+  existsOnWhatsApp?: boolean;
+  name?: string | null;
+  pushname?: string | null;
+  shortName?: string | null;
+  verifiedName?: string | null;
+  displayName?: string | null;
+  about?: string | null;
+  isBusiness?: boolean;
+  isEnterprise?: boolean;
+  isWAContact?: boolean;
+  isMyContact?: boolean;
+  accountType?: string;
+  businessDescription?: string | null;
+  businessCategories?: string[];
+  businessEmail?: string | null;
+  businessWebsite?: string[];
+  businessAddress?: string | null;
+  businessTag?: string | null;
 };
 
 function delay(ms: number): Promise<void> {
@@ -42,6 +65,113 @@ const INVALID_PHONE_MESSAGE =
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function toCachedProfile(result: Awaited<ReturnType<typeof lookupProfileDetails>>): CachedProfile {
+  return {
+    cacheVersion: PROFILE_CACHE_VERSION,
+    profilePicUrl: result.url,
+    whatsappId: result.resolvedId,
+    existsOnWhatsApp: result.existsOnWhatsApp,
+    name: result.name,
+    pushname: result.pushname,
+    shortName: result.shortName,
+    verifiedName: result.verifiedName,
+    displayName: result.displayName,
+    about: result.about,
+    isBusiness: result.isBusiness,
+    isEnterprise: result.isEnterprise,
+    isWAContact: result.isWAContact,
+    isMyContact: result.isMyContact,
+    accountType: result.accountType,
+    businessDescription: result.businessProfile?.description ?? null,
+    businessCategories: result.businessProfile?.categories ?? [],
+    businessEmail: result.businessProfile?.email ?? null,
+    businessWebsite: result.businessProfile?.website ?? [],
+    businessAddress: result.businessProfile?.address ?? null,
+    businessTag: result.businessProfile?.tag ?? null,
+  };
+}
+
+function fromCachedProfile(
+  rawPhone: string,
+  digits: string,
+  cached: CachedProfile,
+): ProfileLookupResult {
+  return {
+    phone: rawPhone,
+    success: true,
+    fromCache: true,
+    hasProfilePic: cached.profilePicUrl !== null,
+    profilePicUrl: cached.profilePicUrl,
+    resolvedPhone: digits,
+    whatsappId: cached.whatsappId,
+    existsOnWhatsApp: cached.existsOnWhatsApp,
+    name: cached.name,
+    pushname: cached.pushname,
+    shortName: cached.shortName,
+    verifiedName: cached.verifiedName,
+    displayName: cached.displayName,
+    about: cached.about,
+    isBusiness: cached.isBusiness,
+    isEnterprise: cached.isEnterprise,
+    isWAContact: cached.isWAContact,
+    isMyContact: cached.isMyContact,
+    accountType: cached.accountType,
+    businessDescription: cached.businessDescription,
+    businessCategories: cached.businessCategories,
+    businessEmail: cached.businessEmail,
+    businessWebsite: cached.businessWebsite,
+    businessAddress: cached.businessAddress,
+    businessTag: cached.businessTag,
+    message:
+      cached.profilePicUrl === null
+        ? "User has no profile picture or privacy settings restrict access"
+        : undefined,
+  };
+}
+
+function toLookupResult(
+  rawPhone: string,
+  digits: string,
+  result: Awaited<ReturnType<typeof lookupProfileDetails>>,
+  fromCache: boolean,
+): ProfileLookupResult {
+  const cached = toCachedProfile(result);
+  const base: ProfileLookupResult = {
+    phone: rawPhone,
+    success: true,
+    fromCache,
+    hasProfilePic: result.url !== null,
+    profilePicUrl: result.url,
+    resolvedPhone: digits,
+    whatsappId: result.resolvedId,
+    existsOnWhatsApp: result.existsOnWhatsApp,
+    name: cached.name,
+    pushname: cached.pushname,
+    shortName: cached.shortName,
+    verifiedName: cached.verifiedName,
+    displayName: cached.displayName,
+    about: cached.about,
+    isBusiness: cached.isBusiness,
+    isEnterprise: cached.isEnterprise,
+    isWAContact: cached.isWAContact,
+    isMyContact: cached.isMyContact,
+    accountType: cached.accountType,
+    businessDescription: cached.businessDescription,
+    businessCategories: cached.businessCategories,
+    businessEmail: cached.businessEmail,
+    businessWebsite: cached.businessWebsite,
+    businessAddress: cached.businessAddress,
+    businessTag: cached.businessTag,
+  };
+
+  if (!result.url) {
+    base.message =
+      "User has no profile picture or privacy settings restrict access";
+  }
+
+  return base;
 }
 
 async function lookupProfile(
@@ -58,26 +188,15 @@ async function lookupProfile(
   }
 
   if (!forceRefresh) {
-    const cachedDigits = getCachedProfileUrl(digits);
-    const cachedRaw = getCachedProfileUrl(rawPhone);
+    const cachedDigits = getCachedProfile(digits);
+    const cachedRaw = getCachedProfile(rawPhone);
     const cached = cachedDigits !== undefined ? cachedDigits : cachedRaw;
-    if (cached !== undefined) {
-      return {
-        phone: rawPhone,
-        success: true,
-        fromCache: true,
-        hasProfilePic: cached !== null,
-        profilePicUrl: cached,
-        resolvedPhone: digits,
-        message:
-          cached === null
-            ? "User has no profile picture or privacy settings restrict access"
-            : undefined,
-      };
+    if (cached !== undefined && cached !== null && isCacheComplete(cached)) {
+      return fromCachedProfile(rawPhone, digits, cached);
     }
   }
 
-  const result = await lookupProfilePicture(digits);
+  const result = await lookupProfileDetails(digits);
   const url = result.url;
   const rawError = result.error;
   const friendlyError =
@@ -86,19 +205,13 @@ async function lookupProfile(
       : rawError;
 
   if (!friendlyError) {
-    setCachedProfileUrl(rawPhone, url);
-    setCachedProfileUrl(digits, url);
+    const cached = toCachedProfile(result);
+    setCachedProfile(rawPhone, cached);
+    setCachedProfile(digits, cached);
   }
 
   if (url) {
-    return {
-      phone: rawPhone,
-      success: true,
-      fromCache: false,
-      hasProfilePic: true,
-      profilePicUrl: url,
-      resolvedPhone: digits,
-    };
+    return toLookupResult(rawPhone, digits, result, false);
   }
 
   if (friendlyError) {
@@ -106,20 +219,19 @@ async function lookupProfile(
       phone: rawPhone,
       success: false,
       resolvedPhone: digits,
+      whatsappId: result.resolvedId,
       error: friendlyError,
       profilePicUrl: null,
+      displayName: result.displayName,
+      about: result.about,
+      accountType: result.accountType,
+      isBusiness: result.isBusiness,
+      isEnterprise: result.isEnterprise,
     };
   }
 
-  return {
-    phone: rawPhone,
-    success: true,
-    fromCache: false,
-    hasProfilePic: false,
-    profilePicUrl: null,
-    resolvedPhone: digits,
-    message: "User has no profile picture or privacy settings restrict access",
-  };
+  const successResult = toLookupResult(rawPhone, digits, result, false);
+  return successResult;
 }
 
 function notReadyResponse() {
@@ -135,6 +247,7 @@ export async function GET(request: NextRequest) {
     const phone = searchParams.get("phone");
     const checkStatus = searchParams.get("checkStatus") === "true";
     const forceRefresh = searchParams.get("refresh") === "true";
+    const debug = searchParams.get("debug") === "true";
 
     if (checkStatus) {
       ensureClientStarted();
@@ -186,6 +299,18 @@ export async function GET(request: NextRequest) {
     ensureClientStarted();
     if (!isClientReady()) {
       return notReadyResponse();
+    }
+
+    if (debug) {
+      const digits = toInternationalDigits(phone);
+      if (!digits) {
+        return NextResponse.json(
+          { error: INVALID_PHONE_MESSAGE },
+          { status: 400 },
+        );
+      }
+      const diagnostic = await diagnoseProfileLookup(digits);
+      return NextResponse.json(diagnostic);
     }
 
     const result = await lookupProfile(phone, forceRefresh);

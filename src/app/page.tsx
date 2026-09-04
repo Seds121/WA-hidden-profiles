@@ -11,9 +11,208 @@ interface ProfileResult {
   message?: string;
   fromCache?: boolean;
   resolvedPhone?: string;
+  whatsappId?: string | null;
+  existsOnWhatsApp?: boolean;
+  name?: string | null;
+  pushname?: string | null;
+  shortName?: string | null;
+  verifiedName?: string | null;
+  displayName?: string | null;
+  about?: string | null;
+  isBusiness?: boolean;
+  isEnterprise?: boolean;
+  isWAContact?: boolean;
+  isMyContact?: boolean;
+  accountType?: string;
+  businessDescription?: string | null;
+  businessCategories?: string[];
+  businessEmail?: string | null;
+  businessWebsite?: string[];
+  businessAddress?: string | null;
+  businessTag?: string | null;
 }
 
 type BatchResult = ProfileResult;
+
+function accountTypeBadgeClass(accountType?: string): string {
+  switch (accountType) {
+    case 'Business':
+      return 'bg-emerald-100 text-emerald-800';
+    case 'Enterprise':
+      return 'bg-purple-100 text-purple-800';
+    default:
+      return 'bg-slate-100 text-slate-700';
+  }
+}
+
+function ProfileAvatar({
+  phone,
+  profilePicUrl,
+  size = 'md',
+}: {
+  phone: string;
+  profilePicUrl: string;
+  size?: 'sm' | 'md' | 'lg';
+}) {
+  const sizeClass =
+    size === 'lg' ? 'w-20 h-20' : size === 'sm' ? 'w-10 h-10' : 'w-16 h-16';
+
+  return (
+    <a
+      href={profilePicUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group shrink-0"
+      title="Open full-size image"
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={profilePicUrl}
+        alt={`Profile for ${phone}`}
+        className={`${sizeClass} rounded-full border-2 border-gray-200 object-cover transition group-hover:border-blue-400 group-hover:shadow-md`}
+        onError={(event) => {
+          event.currentTarget.src = '/fallback-avatar.svg';
+        }}
+      />
+      <span className="mt-1 block text-center text-xs text-blue-600 underline group-hover:text-blue-800">
+        View image
+      </span>
+    </a>
+  );
+}
+
+function DetailRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | null | undefined;
+}) {
+  if (!value) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
+      <dt className="w-36 shrink-0 text-xs font-medium uppercase tracking-wide text-gray-500">
+        {label}
+      </dt>
+      <dd className="text-sm text-gray-800 wrap-break-word">{value}</dd>
+    </div>
+  );
+}
+
+function ProfileDetailsCard({ result }: { result: ProfileResult }) {
+  const accountType = result.accountType || 'Personal';
+  const showBusinessDescription =
+    Boolean(result.businessDescription) &&
+    result.businessDescription !== result.about;
+
+  return (
+    <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-4">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+        {result.hasProfilePic && result.profilePicUrl ? (
+          <ProfileAvatar
+            phone={result.phone}
+            profilePicUrl={result.profilePicUrl}
+            size="lg"
+          />
+        ) : (
+          <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border-2 border-dashed border-gray-300 bg-white text-xs text-gray-400">
+            No photo
+          </div>
+        )}
+
+        <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-lg font-semibold text-gray-900">
+              {result.displayName || result.phone}
+            </h3>
+            <span
+              className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${accountTypeBadgeClass(accountType)}`}
+            >
+              {accountType}
+            </span>
+            {result.verifiedName && (
+              <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800">
+                Verified
+              </span>
+            )}
+            {result.fromCache && (
+              <span className="text-xs text-gray-400">(cached)</span>
+            )}
+          </div>
+
+          {result.displayName && result.displayName !== result.phone && (
+            <p className="text-sm text-gray-500">Input: {result.phone}</p>
+          )}
+
+          <dl className="grid gap-2">
+            <DetailRow label="Push name" value={result.pushname} />
+            <DetailRow label="Business name" value={result.businessTag} />
+            <DetailRow label="Saved name" value={result.name} />
+            <DetailRow label="Verified name" value={result.verifiedName} />
+            <DetailRow label="About" value={result.about} />
+            {showBusinessDescription && (
+              <DetailRow
+                label="Business description"
+                value={result.businessDescription}
+              />
+            )}
+            <DetailRow
+              label="Categories"
+              value={
+                result.businessCategories && result.businessCategories.length > 0
+                  ? result.businessCategories.join(', ')
+                  : null
+              }
+            />
+            <DetailRow label="Email" value={result.businessEmail} />
+            <DetailRow
+              label="Website"
+              value={
+                result.businessWebsite && result.businessWebsite.length > 0
+                  ? result.businessWebsite.join(', ')
+                  : null
+              }
+            />
+            <DetailRow label="Address" value={result.businessAddress} />
+            <DetailRow label="Resolved as" value={result.resolvedPhone} />
+            <DetailRow label="WhatsApp ID" value={result.whatsappId} />
+          </dl>
+
+          <div className="flex flex-wrap gap-2 pt-1">
+            {result.existsOnWhatsApp === false && (
+              <span className="rounded-md bg-amber-100 px-2 py-1 text-xs text-amber-800">
+                Not on WhatsApp
+              </span>
+            )}
+            {result.isMyContact && (
+              <span className="rounded-md bg-indigo-100 px-2 py-1 text-xs text-indigo-800">
+                In your contacts
+              </span>
+            )}
+            {result.isBusiness && (
+              <span className="rounded-md bg-emerald-100 px-2 py-1 text-xs text-emerald-800">
+                Business account
+              </span>
+            )}
+            {result.isEnterprise && (
+              <span className="rounded-md bg-purple-100 px-2 py-1 text-xs text-purple-800">
+                Enterprise account
+              </span>
+            )}
+            {result.success && !result.hasProfilePic && (
+              <span className="rounded-md bg-yellow-100 px-2 py-1 text-xs text-yellow-800">
+                {result.message || 'No profile picture'}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function Home() {
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -70,7 +269,6 @@ export default function Home() {
         aborted ||
         (error instanceof TypeError && error.message === 'Failed to fetch');
 
-      // Compiles, HMR, and overlapping polls drop the request. Keep the last status.
       if (transient) {
         return;
       }
@@ -131,16 +329,7 @@ export default function Home() {
         return;
       }
 
-      setResult({
-        phone: payload.phone || phone,
-        success: payload.success,
-        hasProfilePic: payload.hasProfilePic,
-        profilePicUrl: payload.profilePicUrl,
-        error: payload.error,
-        message: payload.message,
-        fromCache: payload.fromCache,
-        resolvedPhone: payload.resolvedPhone,
-      });
+      setResult(payload);
     } catch (error) {
       console.error('Network error:', error);
       setResult({
@@ -218,12 +407,13 @@ export default function Home() {
 
   return (
     <main className="min-h-screen p-4 md:p-8 bg-gray-50">
-      <div className="max-w-4xl mx-auto">
+      <div className="max-w-5xl mx-auto">
         <h1 className="text-3xl font-bold text-gray-800 mb-2">
           WhatsApp Profile Fetcher
         </h1>
         <p className="text-gray-600 mb-6">
-          Educational tool - fetch profile pictures from phone numbers
+          Fetch profile pictures, names, about text, and business details from
+          phone numbers
         </p>
 
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
@@ -266,7 +456,6 @@ export default function Home() {
                 Scan this QR code with your WhatsApp mobile app:
               </p>
               <div className="bg-white p-2 inline-block rounded shadow">
-                {/* WhatsApp session QR is rendered server-side as a data URL (never sent to a third-party QR API). */}
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={qrCodeDataUrl}
@@ -312,53 +501,11 @@ export default function Home() {
           </div>
 
           {result && (
-            <div className="mt-4 p-4 rounded-lg border border-gray-200">
+            <div className="mt-4">
               {result.success ? (
-                <>
-                  <div className="flex items-center gap-3">
-                    <span className="text-green-600 font-medium">Success</span>
-                    {result.fromCache && (
-                      <span className="text-xs text-gray-400">(cached)</span>
-                    )}
-                    {result.resolvedPhone && (
-                      <span className="text-xs text-gray-500">
-                        looked up as {result.resolvedPhone}
-                      </span>
-                    )}
-                  </div>
-                  {result.hasProfilePic && result.profilePicUrl ? (
-                    <div className="mt-2 flex items-center gap-4">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={result.profilePicUrl}
-                        alt={`Profile for ${result.phone}`}
-                        className="w-16 h-16 rounded-full border-2 border-gray-300 object-cover"
-                        onError={(event) => {
-                          event.currentTarget.src = '/fallback-avatar.svg';
-                        }}
-                      />
-                      <div>
-                        <p className="text-sm text-gray-600">
-                          Profile picture found for {result.phone}
-                        </p>
-                        <a
-                          href={result.profilePicUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-blue-500 underline"
-                        >
-                          Open image
-                        </a>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="text-yellow-600 mt-2">
-                      {result.message || 'No profile picture available'}
-                    </p>
-                  )}
-                </>
+                <ProfileDetailsCard result={result} />
               ) : (
-                <>
+                <div className="rounded-xl border border-red-200 bg-red-50 p-4">
                   <p className="text-red-600 font-medium">Error</p>
                   <p className="text-sm text-red-500 mt-1">{result.error}</p>
                   {result.resolvedPhone && (
@@ -366,7 +513,7 @@ export default function Home() {
                       Looked up as {result.resolvedPhone}
                     </p>
                   )}
-                </>
+                </div>
               )}
             </div>
           )}
@@ -398,60 +545,33 @@ export default function Home() {
           </button>
 
           {batchResults.length > 0 && (
-            <div className="mt-4 overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200 text-sm">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-4 py-2 text-left font-medium text-gray-500">
-                      Phone
-                    </th>
-                    <th className="px-4 py-2 text-left font-medium text-gray-500">
-                      Status
-                    </th>
-                    <th className="px-4 py-2 text-left font-medium text-gray-500">
-                      Profile Pic
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {batchResults.map((row, index) => (
-                    <tr key={`${row.phone}-${index}`}>
-                      <td className="px-4 py-2 text-gray-800">{row.phone}</td>
-                      <td className="px-4 py-2">
-                        {row.success ? (
-                          <span className="text-green-600">Success</span>
-                        ) : (
-                          <span className="text-red-600">Failed</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2">
-                        {row.success && row.hasProfilePic && row.profilePicUrl ? (
-                          <>
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                              src={row.profilePicUrl}
-                              alt={`Profile for ${row.phone}`}
-                              className="w-8 h-8 rounded-full border border-gray-300 object-cover inline-block align-middle"
-                              onError={(event) => {
-                                event.currentTarget.style.display = 'none';
-                              }}
-                            />
-                          </>
-                        ) : row.success && !row.hasProfilePic ? (
-                          <span className="text-gray-400">No pic</span>
-                        ) : (
-                          <span className="text-red-400 text-xs">{row.error}</span>
-                        )}
-                        {row.fromCache && (
-                          <span className="text-xs text-gray-400 ml-1">
-                            (cached)
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="mt-4 space-y-4">
+              <p className="text-sm text-gray-500">
+                {batchResults.length} result
+                {batchResults.length === 1 ? '' : 's'}
+              </p>
+              {batchResults.map((row, index) => (
+                <div key={`${row.phone}-${index}`}>
+                  {row.success ? (
+                    <ProfileDetailsCard result={row} />
+                  ) : (
+                    <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-medium text-gray-900">{row.phone}</p>
+                        <span className="text-xs font-medium text-red-600">
+                          Failed
+                        </span>
+                      </div>
+                      <p className="text-sm text-red-500 mt-1">{row.error}</p>
+                      {row.resolvedPhone && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          Looked up as {row.resolvedPhone}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>
