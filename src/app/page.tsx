@@ -223,6 +223,7 @@ export default function Home() {
   const [batchNumbers, setBatchNumbers] = useState('');
   const [batchResults, setBatchResults] = useState<BatchResult[]>([]);
   const [statusMessage, setStatusMessage] = useState('Checking status...');
+  const [disconnecting, setDisconnecting] = useState(false);
   const statusInFlight = useRef(false);
 
   const checkStatus = useCallback(async (signal?: AbortSignal) => {
@@ -247,6 +248,7 @@ export default function Home() {
         qrCodeDataUrl?: unknown;
         message?: unknown;
         error?: unknown;
+        requiresQrScan?: unknown;
       };
 
       setClientReady(payload.ready === true);
@@ -388,67 +390,125 @@ export default function Home() {
     }
   };
 
-  const handleReset = async () => {
+  const handleDisconnect = async (clearSession = true) => {
+    const confirmed = window.confirm(
+      clearSession
+        ? 'This will log out WhatsApp on this app, delete the saved session, and clear cached profiles. You will need to scan the QR code again. Continue?'
+        : 'This will restart the WhatsApp connection and clear cached profiles. Continue?',
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDisconnecting(true);
     try {
-      await fetch('/api/whatsapp', {
+      const res = await fetch('/api/whatsapp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'reset' }),
+        body: JSON.stringify(
+          clearSession ? { action: 'disconnect' } : { action: 'reset' },
+        ),
       });
-      setClientReady(false);
-      setQrCodeDataUrl(null);
+      const data: unknown = await res.json();
+      const payload =
+        typeof data === 'object' && data !== null
+          ? (data as {
+              message?: string;
+              error?: string;
+              ready?: boolean;
+              qrCodeDataUrl?: string | null;
+            })
+          : {};
+
+      setClientReady(payload.ready === true);
+      setQrCodeDataUrl(
+        typeof payload.qrCodeDataUrl === 'string' ? payload.qrCodeDataUrl : null,
+      );
       setResult(null);
       setBatchResults([]);
+      setStatusMessage(
+        payload.message ||
+          (clearSession
+            ? 'Disconnected. Scan the QR code below to reconnect.'
+            : 'Client reset. Waiting for connection...'),
+      );
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, 1_500);
+      });
       await checkStatus();
     } catch (error) {
-      console.error('Reset error:', error);
+      console.error('Disconnect error:', error);
+      setStatusMessage('Failed to disconnect. Try again.');
+    } finally {
+      setDisconnecting(false);
     }
   };
 
   return (
     <main className="min-h-screen p-4 md:p-8 bg-gray-50">
       <div className="max-w-5xl mx-auto">
-        <h1 className="text-3xl font-bold text-gray-800 mb-2">
-          WhatsApp Profile Fetcher
-        </h1>
-        <p className="text-gray-600 mb-6">
-          Fetch profile pictures, names, about text, and business details from
-          phone numbers
-        </p>
+        <div className="mb-6 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h1 className="text-3xl font-bold text-gray-800 mb-2">
+              WhatsApp Profile Fetcher
+            </h1>
+            <p className="text-gray-600">
+              Fetch profile pictures, names, about text, and business details
+              from phone numbers
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void handleDisconnect(true);
+            }}
+            disabled={disconnecting}
+            className="shrink-0 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {disconnecting
+              ? 'Disconnecting...'
+              : clientReady
+                ? 'Logout'
+                : 'Disconnect & Reconnect'}
+          </button>
+        </div>
 
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
           <h2 className="text-lg font-semibold mb-3 flex items-center gap-2 text-gray-800">
-            Status
+            WhatsApp Connection
             <span
               className={`inline-block w-3 h-3 rounded-full ${clientReady ? 'bg-green-500' : 'bg-yellow-500'}`}
             />
           </h2>
-          <div className="flex flex-wrap items-center gap-4">
+          <div className="flex flex-wrap items-center gap-3">
             <span
               className={`px-3 py-1 rounded-full text-sm ${clientReady ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}
             >
-              {clientReady ? 'Ready' : 'Connecting...'}
+              {clientReady ? 'Connected' : 'Not connected'}
             </span>
-            <span className="text-sm text-gray-500">{statusMessage}</span>
+            <span className="text-sm text-gray-600">{statusMessage}</span>
             <button
               type="button"
               onClick={() => {
                 void checkStatus();
               }}
-              className="text-blue-600 hover:text-blue-800 text-sm underline"
+              disabled={disconnecting}
+              className="text-blue-600 hover:text-blue-800 text-sm underline disabled:opacity-50"
             >
-              Refresh
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                void handleReset();
-              }}
-              className="text-red-600 hover:text-red-800 text-sm underline"
-            >
-              Reset Client & Clear Cache
+              Refresh status
             </button>
           </div>
+
+          {!clientReady && (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
+              <p className="text-sm text-amber-900">
+                Stuck on &quot;Connecting...&quot; or logged in a long time ago?
+                Use <strong>Disconnect &amp; Reconnect</strong> in the top right
+                corner, then scan the new QR code.
+              </p>
+            </div>
+          )}
 
           {!clientReady && qrCodeDataUrl && (
             <div className="mt-4 p-4 bg-gray-100 rounded-lg">

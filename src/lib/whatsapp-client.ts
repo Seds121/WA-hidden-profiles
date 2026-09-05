@@ -19,6 +19,7 @@ type WhatsAppRuntimeState = {
   lastError: string | null;
   lastAttemptAt: number | null;
   readyFallbackTimer: ReturnType<typeof setTimeout> | null;
+  requiresQrScan: boolean;
 };
 
 const RETRY_COOLDOWN_MS = 15_000;
@@ -41,6 +42,7 @@ function getRuntimeState(): WhatsAppRuntimeState {
       lastError: null,
       lastAttemptAt: null,
       readyFallbackTimer: null,
+      requiresQrScan: false,
     };
   }
 
@@ -53,6 +55,9 @@ function getRuntimeState(): WhatsAppRuntimeState {
   }
   if (state.readyFallbackTimer === undefined) {
     state.readyFallbackTimer = null;
+  }
+  if (typeof state.requiresQrScan !== "boolean") {
+    state.requiresQrScan = false;
   }
   return state;
 }
@@ -86,6 +91,15 @@ function clearReadyFallbackTimer(): void {
   }
 }
 
+function hasPersistedSession(): boolean {
+  try {
+    const sessionDir = path.join(resolveSessionDir(), "session");
+    return fs.existsSync(path.join(sessionDir, "Default"));
+  } catch {
+    return false;
+  }
+}
+
 function resetRuntimeState(preserveError = false): void {
   const state = getRuntimeState();
   const lastError = preserveError ? state.lastError : null;
@@ -98,6 +112,7 @@ function resetRuntimeState(preserveError = false): void {
   state.qrCode = null;
   state.qrCodeDataUrl = null;
   state.startPromise = null;
+  state.requiresQrScan = false;
   state.lastError = lastError;
   state.lastAttemptAt = lastAttemptAt;
 }
@@ -118,6 +133,7 @@ function markReady(client: Client, source: string): void {
   state.qrCodeDataUrl = null;
   state.lastError = null;
   state.loadingPercent = null;
+  state.requiresQrScan = false;
   console.log(`WhatsApp client is ready (${source}).`);
 }
 
@@ -175,6 +191,8 @@ async function launchClient(): Promise<void> {
     }
     const current = getRuntimeState();
     current.qrCode = qr;
+    current.requiresQrScan = true;
+    current.isReady = false;
     current.lastError = null;
     console.log("QR Code received. Scan with WhatsApp:");
     qrcodeTerminal.generate(qr, { small: true });
@@ -307,52 +325,91 @@ export function getQRCode(): string | null {
 }
 
 export function isClientReady(): boolean {
-  return getRuntimeState().isReady;
+  const state = getRuntimeState();
+  const awaitingQr =
+    state.requiresQrScan || Boolean(state.qrCode || state.qrCodeDataUrl);
+  return state.isReady && !awaitingQr;
 }
 
-export async function resetClient(): Promise<void> {
+export async function resetClient(options?: {
+  clearSession?: boolean;
+}): Promise<void> {
+  const clearSession = options?.clearSession ?? false;
   const state = getRuntimeState();
   const existing = state.client;
-  if (existing) {
-    existing.removeAllListeners();
-  }
+
   resetRuntimeState(false);
+  getRuntimeState().requiresQrScan = clearSession;
 
   if (existing) {
-    try {
-      await existing.destroy();
-    } catch (error: unknown) {
-      console.error("Error destroying WhatsApp client:", error);
+    if (clearSession) {
+      try {
+        await existing.logout();
+      } catch (error: unknown) {
+        console.warn(
+          "WhatsApp logout failed, destroying client instead:",
+          getErrorMessage(error),
+        );
+        try {
+          await existing.destroy();
+        } catch (destroyError: unknown) {
+          console.error("Error destroying WhatsApp client:", destroyError);
+        }
+      }
+    } else {
+      existing.removeAllListeners();
+      try {
+        await existing.destroy();
+      } catch (error: unknown) {
+        console.error("Error destroying WhatsApp client:", error);
+      }
     }
+  }
+
+  if (clearSession) {
+    const sessionDir = resolveSessionDir();
+    if (fs.existsSync(sessionDir)) {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    }
+    ensureSessionDirectory();
+    getRuntimeState().requiresQrScan = true;
   }
 }
 
 export async function getStatus() {
   const state = getRuntimeState();
 
-  if (state.client && !state.isReady) {
+  if (state.client && !state.isReady && !state.requiresQrScan) {
     try {
       const waState = await state.client.getState();
       if (waState === "CONNECTED") {
         markReady(state.client, "connected-state");
       }
     } catch {
-      // Session already restored (no QR) but the library never emitted 'ready'.
-      if (state.client.pupPage && !state.qrCode) {
+      // Only trust a restored session when auth files still exist on disk.
+      if (
+        state.client.pupPage &&
+        !state.qrCode &&
+        hasPersistedSession()
+      ) {
         markReady(state.client, "session-page");
       }
     }
   }
 
   const current = getRuntimeState();
+  const awaitingQr =
+    current.requiresQrScan || Boolean(current.qrCode || current.qrCodeDataUrl);
+
   return {
-    ready: current.isReady,
+    ready: current.isReady && !awaitingQr,
     authenticated: current.authenticated,
     loadingPercent: current.loadingPercent,
     qrCode: current.qrCode,
     qrCodeDataUrl: current.qrCodeDataUrl,
     initialized: current.client !== null || current.startPromise !== null,
     lastError: current.lastError,
+    requiresQrScan: current.requiresQrScan,
   };
 }
 

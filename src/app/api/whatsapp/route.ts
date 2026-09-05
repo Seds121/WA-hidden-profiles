@@ -255,10 +255,10 @@ export async function GET(request: NextRequest) {
       let message = "Initializing...";
       if (status.ready) {
         message = "WhatsApp client is ready";
+      } else if (status.qrCode || status.qrCodeDataUrl || status.requiresQrScan) {
+        message = "Scan QR code to authenticate";
       } else if (status.lastError) {
         message = status.lastError;
-      } else if (status.qrCode || status.qrCodeDataUrl) {
-        message = "Scan QR code to authenticate";
       } else if (status.authenticated) {
         message = "Authenticated, finishing setup...";
       } else if (
@@ -278,6 +278,7 @@ export async function GET(request: NextRequest) {
         qrCodeDataUrl: status.qrCodeDataUrl,
         initialized: status.initialized,
         lastError: status.lastError,
+        requiresQrScan: status.requiresQrScan,
         message,
       });
     }
@@ -331,12 +332,22 @@ export async function POST(request: NextRequest) {
 
     const { action, phones } = body as { action?: unknown; phones?: unknown };
 
-    if (action === "reset") {
-      await resetClient();
+    if (action === "reset" || action === "disconnect") {
+      const clearSession =
+        action === "disconnect" ||
+        (body as { clearSession?: boolean }).clearSession === true;
+      await resetClient({ clearSession });
       clearProfileCache();
+      ensureClientStarted();
+      const status = await getStatus();
       return NextResponse.json({
         success: true,
-        message: "WhatsApp client reset and cache cleared successfully",
+        ready: status.ready,
+        qrCodeDataUrl: status.qrCodeDataUrl,
+        requiresQrScan: status.requiresQrScan,
+        message: clearSession
+          ? "Disconnected. Scan the new QR code to link WhatsApp again."
+          : "WhatsApp client reset and cache cleared successfully",
       });
     }
 
@@ -369,7 +380,7 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json(
-      { error: "Invalid action. Supported: reset, fetchMultiple" },
+      { error: "Invalid action. Supported: reset, disconnect, fetchMultiple" },
       { status: 400 },
     );
   } catch (error: unknown) {
