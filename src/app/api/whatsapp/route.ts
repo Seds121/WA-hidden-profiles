@@ -1,244 +1,77 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getErrorMessage, isUselessErrorMessage } from "@/lib/errors";
-import { toInternationalDigits } from "@/lib/phone";
 import {
-  type CachedProfile,
-  clearProfileCache,
-  getCachedProfile,
-  isCacheComplete,
-  PROFILE_CACHE_VERSION,
-  setCachedProfile,
-} from "@/lib/profile-cache";
+  getApiChunkSize,
+  getBatchChunkSize,
+  getBatchDelayMs,
+  getLogProgressInterval,
+  pickAccountForIndex,
+  registerNewAccount,
+  deleteRegisteredAccount,
+} from "@/lib/account-pool";
+import { getErrorMessage } from "@/lib/errors";
+import {
+  delay,
+  INVALID_PHONE_MESSAGE,
+  lookupProfile,
+  persistRunResults,
+  pickReadyAccount,
+} from "@/lib/lookup-profile";
+import { toInternationalDigits } from "@/lib/phone";
+import { clearProfileCache } from "@/lib/profile-cache";
+import type { ProfileLookupResult } from "@/lib/profile-types";
 import {
   ensureClientStarted,
+  ensureAllAccountsStarted,
+  getAllAccountsStatus,
+  getReadyAccountIds,
   getStatus,
   isClientReady,
-  lookupProfileDetails,
   diagnoseProfileLookup,
   resetClient,
 } from "@/lib/whatsapp-client";
+
+export type { ProfileLookupResult } from "@/lib/profile-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const BATCH_DELAY_MS = 400;
-
-export type ProfileLookupResult = {
-  phone: string;
-  success: boolean;
-  fromCache?: boolean;
-  hasProfilePic?: boolean;
-  profilePicUrl?: string | null;
-  error?: string;
-  message?: string;
-  resolvedPhone?: string;
-  whatsappId?: string | null;
-  existsOnWhatsApp?: boolean;
-  name?: string | null;
-  pushname?: string | null;
-  shortName?: string | null;
-  verifiedName?: string | null;
-  displayName?: string | null;
-  about?: string | null;
-  isBusiness?: boolean;
-  isEnterprise?: boolean;
-  isWAContact?: boolean;
-  isMyContact?: boolean;
-  accountType?: string;
-  businessDescription?: string | null;
-  businessCategories?: string[];
-  businessEmail?: string | null;
-  businessWebsite?: string[];
-  businessAddress?: string | null;
-  businessTag?: string | null;
-};
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
-const INVALID_PHONE_MESSAGE =
-  "Invalid phone number. Use a local number (e.g. 03110365141) or international digits (e.g. 923110365141).";
-
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function toCachedProfile(result: Awaited<ReturnType<typeof lookupProfileDetails>>): CachedProfile {
-  return {
-    cacheVersion: PROFILE_CACHE_VERSION,
-    profilePicUrl: result.url,
-    whatsappId: result.resolvedId,
-    existsOnWhatsApp: result.existsOnWhatsApp,
-    name: result.name,
-    pushname: result.pushname,
-    shortName: result.shortName,
-    verifiedName: result.verifiedName,
-    displayName: result.displayName,
-    about: result.about,
-    isBusiness: result.isBusiness,
-    isEnterprise: result.isEnterprise,
-    isWAContact: result.isWAContact,
-    isMyContact: result.isMyContact,
-    accountType: result.accountType,
-    businessDescription: result.businessProfile?.description ?? null,
-    businessCategories: result.businessProfile?.categories ?? [],
-    businessEmail: result.businessProfile?.email ?? null,
-    businessWebsite: result.businessProfile?.website ?? [],
-    businessAddress: result.businessProfile?.address ?? null,
-    businessTag: result.businessProfile?.tag ?? null,
-  };
-}
-
-function fromCachedProfile(
-  rawPhone: string,
-  digits: string,
-  cached: CachedProfile,
-): ProfileLookupResult {
-  return {
-    phone: rawPhone,
-    success: true,
-    fromCache: true,
-    hasProfilePic: cached.profilePicUrl !== null,
-    profilePicUrl: cached.profilePicUrl,
-    resolvedPhone: digits,
-    whatsappId: cached.whatsappId,
-    existsOnWhatsApp: cached.existsOnWhatsApp,
-    name: cached.name,
-    pushname: cached.pushname,
-    shortName: cached.shortName,
-    verifiedName: cached.verifiedName,
-    displayName: cached.displayName,
-    about: cached.about,
-    isBusiness: cached.isBusiness,
-    isEnterprise: cached.isEnterprise,
-    isWAContact: cached.isWAContact,
-    isMyContact: cached.isMyContact,
-    accountType: cached.accountType,
-    businessDescription: cached.businessDescription,
-    businessCategories: cached.businessCategories,
-    businessEmail: cached.businessEmail,
-    businessWebsite: cached.businessWebsite,
-    businessAddress: cached.businessAddress,
-    businessTag: cached.businessTag,
-    message:
-      cached.profilePicUrl === null
-        ? "User has no profile picture or privacy settings restrict access"
-        : undefined,
-  };
-}
-
-function toLookupResult(
-  rawPhone: string,
-  digits: string,
-  result: Awaited<ReturnType<typeof lookupProfileDetails>>,
-  fromCache: boolean,
-): ProfileLookupResult {
-  const cached = toCachedProfile(result);
-  const base: ProfileLookupResult = {
-    phone: rawPhone,
-    success: true,
-    fromCache,
-    hasProfilePic: result.url !== null,
-    profilePicUrl: result.url,
-    resolvedPhone: digits,
-    whatsappId: result.resolvedId,
-    existsOnWhatsApp: result.existsOnWhatsApp,
-    name: cached.name,
-    pushname: cached.pushname,
-    shortName: cached.shortName,
-    verifiedName: cached.verifiedName,
-    displayName: cached.displayName,
-    about: cached.about,
-    isBusiness: cached.isBusiness,
-    isEnterprise: cached.isEnterprise,
-    isWAContact: cached.isWAContact,
-    isMyContact: cached.isMyContact,
-    accountType: cached.accountType,
-    businessDescription: cached.businessDescription,
-    businessCategories: cached.businessCategories,
-    businessEmail: cached.businessEmail,
-    businessWebsite: cached.businessWebsite,
-    businessAddress: cached.businessAddress,
-    businessTag: cached.businessTag,
-  };
-
-  if (!result.url) {
-    base.message =
-      "User has no profile picture or privacy settings restrict access";
-  }
-
-  return base;
-}
-
-async function lookupProfile(
-  rawPhone: string,
-  forceRefresh: boolean,
-): Promise<ProfileLookupResult> {
-  const digits = toInternationalDigits(rawPhone);
-  if (!digits) {
-    return {
-      phone: rawPhone,
-      success: false,
-      error: INVALID_PHONE_MESSAGE,
-    };
-  }
-
-  if (!forceRefresh) {
-    const cachedDigits = getCachedProfile(digits);
-    const cachedRaw = getCachedProfile(rawPhone);
-    const cached = cachedDigits !== undefined ? cachedDigits : cachedRaw;
-    if (cached !== undefined && cached !== null && isCacheComplete(cached)) {
-      return fromCachedProfile(rawPhone, digits, cached);
-    }
-  }
-
-  const result = await lookupProfileDetails(digits);
-  const url = result.url;
-  const rawError = result.error;
-  const friendlyError =
-    rawError && isUselessErrorMessage(rawError)
-      ? `Could not fetch a profile picture for ${digits}. The number may be private, not on WhatsApp, or WhatsApp blocked the lookup.`
-      : rawError;
-
-  if (!friendlyError) {
-    const cached = toCachedProfile(result);
-    setCachedProfile(rawPhone, cached);
-    setCachedProfile(digits, cached);
-  }
-
-  if (url) {
-    return toLookupResult(rawPhone, digits, result, false);
-  }
-
-  if (friendlyError) {
-    return {
-      phone: rawPhone,
-      success: false,
-      resolvedPhone: digits,
-      whatsappId: result.resolvedId,
-      error: friendlyError,
-      profilePicUrl: null,
-      displayName: result.displayName,
-      about: result.about,
-      accountType: result.accountType,
-      isBusiness: result.isBusiness,
-      isEnterprise: result.isEnterprise,
-    };
-  }
-
-  const successResult = toLookupResult(rawPhone, digits, result, false);
-  return successResult;
-}
-
 function notReadyResponse() {
   return NextResponse.json(
-    { error: "WhatsApp client not ready yet. Please scan QR code." },
+    {
+      error:
+        "No WhatsApp account is ready. Connect at least one account and scan its QR code.",
+    },
     { status: 503 },
   );
+}
+
+function statusMessageFromAccount(
+  status: Awaited<ReturnType<typeof getStatus>>,
+): string {
+  if (status.ready) {
+    return `WhatsApp account ${status.accountId} is ready`;
+  }
+  if (status.qrCode || status.qrCodeDataUrl) {
+    return `Scan QR code for account ${status.accountId}`;
+  }
+  if (status.lastError) {
+    return status.lastError;
+  }
+  if (status.authenticated) {
+    return `Account ${status.accountId} authenticated, finishing setup...`;
+  }
+  if (typeof status.loadingPercent === "number" && status.loadingPercent >= 0) {
+    return `Loading account ${status.accountId}... ${status.loadingPercent}%`;
+  }
+  if (status.initialized) {
+    return `Starting account ${status.accountId} — QR may take 1-2 min on VPS`;
+  }
+  return "Starting WhatsApp client...";
 }
 
 export async function GET(request: NextRequest) {
@@ -250,36 +83,35 @@ export async function GET(request: NextRequest) {
     const debug = searchParams.get("debug") === "true";
 
     if (checkStatus) {
-      ensureClientStarted();
-      const status = await getStatus();
-      let message = "Initializing...";
-      if (status.ready) {
-        message = "WhatsApp client is ready";
-      } else if (status.qrCode || status.qrCodeDataUrl || status.requiresQrScan) {
-        message = "Scan QR code to authenticate";
-      } else if (status.lastError) {
-        message = status.lastError;
-      } else if (status.authenticated) {
-        message = "Authenticated, finishing setup...";
-      } else if (
-        typeof status.loadingPercent === "number" &&
-        status.loadingPercent >= 0
-      ) {
-        message = `Loading WhatsApp... ${status.loadingPercent}%`;
-      } else if (status.initialized) {
-        message = "Connecting to WhatsApp...";
-      }
+      ensureAllAccountsStarted();
+      const { startQueueWorker } = await import("@/lib/queue-worker");
+      startQueueWorker();
+      const statusAccountId = searchParams.get("accountId") || "1";
+      const pool = await getAllAccountsStatus();
+      const primary =
+        pool.accounts.find((account) => account.accountId === statusAccountId) ||
+        pool.accounts[0];
 
       return NextResponse.json({
-        ready: status.ready,
-        authenticated: status.authenticated,
-        loadingPercent: status.loadingPercent,
-        qrCode: status.qrCode,
-        qrCodeDataUrl: status.qrCodeDataUrl,
-        initialized: status.initialized,
-        lastError: status.lastError,
-        requiresQrScan: status.requiresQrScan,
-        message,
+        ready: pool.anyReady,
+        readyCount: pool.readyCount,
+        accounts: pool.accounts,
+        accountId: primary?.accountId ?? "1",
+        authenticated: primary?.authenticated ?? false,
+        loadingPercent: primary?.loadingPercent ?? null,
+        qrCode: primary?.qrCode ?? null,
+        qrCodeDataUrl: primary?.qrCodeDataUrl ?? null,
+        initialized: primary?.initialized ?? false,
+        lastError: primary?.lastError ?? null,
+        requiresQrScan: primary?.requiresQrScan ?? false,
+        batchChunkSize: getBatchChunkSize(),
+        apiChunkSize: getApiChunkSize(),
+        logProgressInterval: getLogProgressInterval(),
+        message: pool.anyReady
+          ? `${pool.readyCount} WhatsApp account(s) ready`
+          : primary
+            ? statusMessageFromAccount(primary)
+            : "Initializing...",
       });
     }
 
@@ -297,8 +129,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    ensureClientStarted();
-    if (!isClientReady()) {
+    const requestedAccountId = searchParams.get("accountId");
+    const accountId = pickReadyAccount(requestedAccountId);
+    if (!accountId) {
       return notReadyResponse();
     }
 
@@ -310,12 +143,14 @@ export async function GET(request: NextRequest) {
           { status: 400 },
         );
       }
-      const diagnostic = await diagnoseProfileLookup(digits);
+      const diagnostic = await diagnoseProfileLookup(digits, accountId);
       return NextResponse.json(diagnostic);
     }
 
-    const result = await lookupProfile(phone, forceRefresh);
-    return NextResponse.json(result);
+    const result = await lookupProfile(phone, forceRefresh, accountId);
+    const runId = searchParams.get("runId");
+    await persistRunResults(runId, [result]);
+    return NextResponse.json({ ...result, runId: runId ?? undefined });
   } catch (error: unknown) {
     const message = getErrorMessage(error);
     const status = message.includes("not ready") ? 503 : 500;
@@ -330,24 +165,85 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { action, phones } = body as { action?: unknown; phones?: unknown };
+    const payload = body as {
+      action?: unknown;
+      phones?: unknown;
+      startIndex?: unknown;
+      accountId?: unknown;
+      runId?: unknown;
+      clearSession?: boolean;
+    };
+
+    const { action, phones } = payload;
+
+    if (action === "addAccount") {
+      const accountId = registerNewAccount();
+      ensureClientStarted(accountId);
+      await delay(200);
+      const pool = await getAllAccountsStatus();
+      const status = await getStatus(accountId);
+      return NextResponse.json({
+        success: true,
+        accountId,
+        accounts: pool.accounts,
+        readyCount: pool.readyCount,
+        message: `Account ${accountId} added. Scan the QR code to connect.`,
+        qrCodeDataUrl: status.qrCodeDataUrl,
+      });
+    }
+
+    if (action === "deleteAccount") {
+      const accountId =
+        typeof payload.accountId === "string" && payload.accountId.trim()
+          ? payload.accountId.trim()
+          : "";
+
+      if (!accountId) {
+        return NextResponse.json(
+          { error: "accountId is required" },
+          { status: 400 },
+        );
+      }
+
+      await resetClient({ clearSession: true, accountId });
+      deleteRegisteredAccount(accountId);
+      clearProfileCache();
+      await delay(300);
+
+      const pool = await getAllAccountsStatus();
+      return NextResponse.json({
+        success: true,
+        accountId,
+        accounts: pool.accounts,
+        readyCount: pool.readyCount,
+        message: `Account ${accountId} deleted and logged out`,
+      });
+    }
 
     if (action === "reset" || action === "disconnect") {
       const clearSession =
         action === "disconnect" ||
-        (body as { clearSession?: boolean }).clearSession === true;
-      await resetClient({ clearSession });
+        action === "reset" ||
+        payload.clearSession === true;
+      const accountId =
+        typeof payload.accountId === "string" && payload.accountId.trim()
+          ? payload.accountId.trim()
+          : "1";
+
+      await resetClient({ clearSession, accountId });
       clearProfileCache();
-      ensureClientStarted();
-      const status = await getStatus();
+      await delay(300);
+      ensureClientStarted(accountId);
+      const status = await getStatus(accountId);
       return NextResponse.json({
         success: true,
+        accountId,
         ready: status.ready,
         qrCodeDataUrl: status.qrCodeDataUrl,
         requiresQrScan: status.requiresQrScan,
         message: clearSession
-          ? "Disconnected. Scan the new QR code to link WhatsApp again."
-          : "WhatsApp client reset and cache cleared successfully",
+          ? `Account ${accountId} disconnected. Scan the new QR code.`
+          : `Account ${accountId} reset successfully`,
       });
     }
 
@@ -359,28 +255,82 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      ensureClientStarted();
-      if (!isClientReady()) {
+      if (phones.length > getApiChunkSize()) {
+        return NextResponse.json(
+          {
+            error: `Send at most ${getApiChunkSize()} numbers per request. Process large CSVs in chunks from the browser.`,
+          },
+          { status: 400 },
+        );
+      }
+
+      ensureAllAccountsStarted();
+      const readyAccounts = getReadyAccountIds();
+      if (readyAccounts.length === 0) {
         return notReadyResponse();
       }
 
+      const startIndex =
+        typeof payload.startIndex === "number" && payload.startIndex >= 0
+          ? payload.startIndex
+          : 0;
+
+      const runId =
+        typeof payload.runId === "string" && payload.runId.trim()
+          ? payload.runId.trim()
+          : null;
+
       const results: ProfileLookupResult[] = [];
-      for (const rawPhone of phones) {
-        const result = await lookupProfile(rawPhone, false);
+      const { appendFetchRunLog } = await import("@/lib/fetch-run-store");
+
+      for (let i = 0; i < phones.length; i += 1) {
+        const rawPhone = phones[i];
+        const seq = startIndex + i + 1;
+        const preferredAccountId =
+          pickAccountForIndex(startIndex + i, readyAccounts) || readyAccounts[0];
+        const accountId =
+          isClientReady(preferredAccountId)
+            ? preferredAccountId
+            : readyAccounts.find((id) => isClientReady(id)) || readyAccounts[0];
+
+        if (!isClientReady(accountId)) {
+          const failed = {
+            phone: rawPhone,
+            success: false,
+            error: `WhatsApp account ${accountId} is not ready`,
+            accountId,
+          };
+          results.push(failed);
+          if (runId) {
+            await appendFetchRunLog(runId, seq, failed, accountId);
+          }
+          continue;
+        }
+
+        const result = await lookupProfile(rawPhone, false, accountId);
         results.push(result);
-        if (!result.fromCache) {
-          await delay(BATCH_DELAY_MS);
+        if (runId) {
+          await appendFetchRunLog(runId, seq, result, accountId);
+        }
+        if (!result.fromCache && !result.reusedFromDb) {
+          await delay(getBatchDelayMs());
         }
       }
+
+      await persistRunResults(runId, results);
 
       return NextResponse.json({
         success: true,
         results,
+        startIndex,
+        chunkSize: getBatchChunkSize(),
+        readyAccounts,
+        runId,
       });
     }
 
     return NextResponse.json(
-      { error: "Invalid action. Supported: reset, disconnect, fetchMultiple" },
+      { error: "Invalid action. Supported: addAccount, deleteAccount, reset, disconnect, fetchMultiple" },
       { status: 400 },
     );
   } catch (error: unknown) {

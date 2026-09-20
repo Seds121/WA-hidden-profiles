@@ -1,19 +1,204 @@
 @import "tailwindcss";
 
+/* ─── Design tokens — indigo / violet (no green primary) ─── */
 :root {
-  --background: #f9fafb;
-  --foreground: #171717;
+  --background: #f8fafc;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --foreground: #0f172a;
+  --foreground-muted: #64748b;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-muted: #eef2ff;
+  --primary-foreground: #ffffff;
+
+  --accent: #7c3aed;
+  --accent-muted: #f5f3ff;
+
+  --success: #2563eb;
+  --success-bg: #eff6ff;
+  --success-border: #bfdbfe;
+  --warning: #d97706;
+  --warning-bg: #fffbeb;
+  --warning-border: #fde68a;
+  --error: #dc2626;
+  --error-bg: #fef2f2;
+  --error-border: #fecaca;
+  --info: #0ea5e9;
+  --info-bg: #f0f9ff;
+  --info-border: #bae6fd;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-full: 9999px;
+
+  --shadow-sm: 0 1px 2px rgb(15 23 42 / 0.04), 0 1px 3px rgb(15 23 42 / 0.06);
+  --shadow-md: 0 4px 6px rgb(15 23 42 / 0.04), 0 8px 24px rgb(79 70 229 / 0.08);
+  --shadow-lg: 0 12px 40px rgb(79 70 229 / 0.12);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --ring: 0 0 0 3px rgb(79 70 229 / 0.25);
+}
+
+.dark {
+  --background: #0b1120;
+  --surface: #111827;
+  --surface-elevated: #1e293b;
+  --foreground: #f1f5f9;
+  --foreground-muted: #94a3b8;
+  --border: #334155;
+  --border-strong: #475569;
+
+  --primary: #818cf8;
+  --primary-hover: #a5b4fc;
+  --primary-muted: #312e81;
+  --primary-foreground: #0f172a;
+
+  --accent: #a78bfa;
+  --accent-muted: #4c1d95;
+
+  --success-bg: #1e3a8a;
+  --success-border: #2563eb;
+  --warning-bg: #78350f;
+  --warning-border: #b45309;
+  --error-bg: #7f1d1d;
+  --error-border: #b91c1c;
+  --info-bg: #0c4a6e;
+  --info-border: #0284c7;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.2);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 0.35);
+  --shadow-lg: 0 16px 48px rgb(0 0 0 / 0.45);
+
+  --ring: 0 0 0 3px rgb(129 140 248 / 0.35);
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
   --color-foreground: var(--foreground);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-muted: var(--primary-muted);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-muted: var(--accent-muted);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-success-border: var(--success-border);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-warning-border: var(--warning-border);
+  --color-error: var(--error);
+  --color-error-bg: var(--error-bg);
+  --color-error-border: var(--error-border);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-info-border: var(--info-border);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes pulse-ring {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.15);
+  }
+}
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 body {
-  background: var(--background);
+  background:
+    radial-gradient(
+      ellipse 90% 60% at 50% -10%,
+      color-mix(in srgb, var(--primary) 14%, transparent),
+      transparent
+    ),
+    radial-gradient(
+      ellipse 60% 40% at 100% 0%,
+      color-mix(in srgb, var(--accent) 8%, transparent),
+      transparent
+    ),
+    var(--background);
   color: var(--foreground);
-  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--border) 0%,
+    color-mix(in srgb, var(--border) 60%, var(--surface)) 50%,
+    var(--border) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+}
+
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.app-shell-header {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--primary) 92%, #1e1b4b) 0%,
+    color-mix(in srgb, var(--accent) 88%, #312e81) 100%
+  );
 }

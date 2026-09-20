@@ -157,10 +157,12 @@ async function installNetworkCaptureHooks(page: Page): Promise<void> {
     xhrProto.open = function (
       method: string,
       url: string | URL,
-      ...rest: [boolean?, string?, string?]
+      async: boolean = true,
+      username?: string | null,
+      password?: string | null,
     ) {
       (this as XMLHttpRequest & { __waUrl?: string }).__waUrl = String(url);
-      return originalOpen.call(this, method, url, ...rest);
+      return originalOpen.call(this, method, url, async, username, password);
     };
 
     xhrProto.send = function (...args: Parameters<XMLHttpRequest["send"]>) {
@@ -674,8 +676,22 @@ async function openContactInfoViaClient(
   const steps: string[] = [];
   try {
     await page.evaluate(async (id) => {
-      const chat = await window.WWebJS.getChat(id, { getAsModel: false });
-      await window.require("WAWebCmd").Cmd.openChatBottom({ chat });
+      const win = window as unknown as {
+        WWebJS: {
+          getChat: (
+            chatId: string,
+            options: { getAsModel: boolean },
+          ) => Promise<unknown>;
+        };
+        require: (name: string) => {
+          Cmd: {
+            openChatBottom: (opts: { chat: unknown }) => Promise<void>;
+            openDrawerMid: (chat: unknown) => Promise<void>;
+          };
+        };
+      };
+      const chat = await win.WWebJS.getChat(id, { getAsModel: false });
+      await win.require("WAWebCmd").Cmd.openChatBottom({ chat });
     }, chatId);
     steps.push("evaluate.openChatWindow.ok");
   } catch (error) {
@@ -684,8 +700,21 @@ async function openContactInfoViaClient(
 
   try {
     await page.evaluate(async (id) => {
-      const chat = await window.WWebJS.getChat(id, { getAsModel: false });
-      await window.require("WAWebCmd").Cmd.openDrawerMid(chat);
+      const win = window as unknown as {
+        WWebJS: {
+          getChat: (
+            chatId: string,
+            options: { getAsModel: boolean },
+          ) => Promise<unknown>;
+        };
+        require: (name: string) => {
+          Cmd: {
+            openDrawerMid: (chat: unknown) => Promise<void>;
+          };
+        };
+      };
+      const chat = await win.WWebJS.getChat(id, { getAsModel: false });
+      await win.require("WAWebCmd").Cmd.openDrawerMid(chat);
     }, chatId);
     steps.push("evaluate.openChatDrawer.ok");
   } catch (error) {

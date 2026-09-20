@@ -1,0 +1,17 @@
+node_modules
+.next
+.git
+.vercel
+.wwebjs_auth
+.wwebjs_cache
+.env
+.env.*
+!.env.vps.example
+coverage
+*.log
+npm-debug.log*
+.DS_Store
+README.md
+VPS_DEPLOY.md
+reports
+temp-debug-*.json

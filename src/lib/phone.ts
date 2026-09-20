@@ -7,7 +7,17 @@
  *   9876543210   → 919876543210  (India 10-digit mobile)
  */
 export function toInternationalDigits(phone: string): string | null {
-  const cleaned = phone.replace(/\D/g, "");
+  let cleaned = phone.trim();
+  if (!cleaned) {
+    return null;
+  }
+
+  cleaned = cleaned.replace(/^00/, "+");
+  if (cleaned.startsWith("+")) {
+    cleaned = cleaned.slice(1);
+  }
+
+  cleaned = cleaned.replace(/\D/g, "");
   if (cleaned.length < 10 || cleaned.length > 15) {
     return null;
   }

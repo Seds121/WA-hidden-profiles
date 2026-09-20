@@ -1,230 +1,67 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-
-interface ProfileResult {
-  phone: string;
-  success: boolean;
-  hasProfilePic?: boolean;
-  profilePicUrl?: string | null;
-  error?: string;
-  message?: string;
-  fromCache?: boolean;
-  resolvedPhone?: string;
-  whatsappId?: string | null;
-  existsOnWhatsApp?: boolean;
-  name?: string | null;
-  pushname?: string | null;
-  shortName?: string | null;
-  verifiedName?: string | null;
-  displayName?: string | null;
-  about?: string | null;
-  isBusiness?: boolean;
-  isEnterprise?: boolean;
-  isWAContact?: boolean;
-  isMyContact?: boolean;
-  accountType?: string;
-  businessDescription?: string | null;
-  businessCategories?: string[];
-  businessEmail?: string | null;
-  businessWebsite?: string[];
-  businessAddress?: string | null;
-  businessTag?: string | null;
-}
+import { ActivityLog } from '@/components/activity-log';
+import { AppNav } from '@/components/app-nav';
+import { ConfirmModal } from '@/components/confirm-modal';
+import { LookupPanel } from '@/components/lookup-panel';
+import type { ProfileResult } from '@/components/profile-details-card';
+import {
+  WhatsAppAccountsCard,
+  type AccountStatus,
+} from '@/components/whatsapp-accounts-card';
+import { useToast } from '@/components/toast-provider';
+import { Card } from '@/components/ui/card';
+import { ProgressBar } from '@/components/ui/progress-bar';
+import { useActivityLog } from '@/hooks/use-activity-log';
 
 type BatchResult = ProfileResult;
 
-function accountTypeBadgeClass(accountType?: string): string {
-  switch (accountType) {
-    case 'Business':
-      return 'bg-emerald-100 text-emerald-800';
-    case 'Enterprise':
-      return 'bg-purple-100 text-purple-800';
-    default:
-      return 'bg-slate-100 text-slate-700';
-  }
-}
-
-function ProfileAvatar({
-  phone,
-  profilePicUrl,
-  size = 'md',
-}: {
-  phone: string;
-  profilePicUrl: string;
-  size?: 'sm' | 'md' | 'lg';
-}) {
-  const sizeClass =
-    size === 'lg' ? 'w-20 h-20' : size === 'sm' ? 'w-10 h-10' : 'w-16 h-16';
-
-  return (
-    <a
-      href={profilePicUrl}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="group shrink-0"
-      title="Open full-size image"
-    >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={profilePicUrl}
-        alt={`Profile for ${phone}`}
-        className={`${sizeClass} rounded-full border-2 border-gray-200 object-cover transition group-hover:border-blue-400 group-hover:shadow-md`}
-        onError={(event) => {
-          event.currentTarget.src = '/fallback-avatar.svg';
-        }}
-      />
-      <span className="mt-1 block text-center text-xs text-blue-600 underline group-hover:text-blue-800">
-        View image
-      </span>
-    </a>
-  );
-}
-
-function DetailRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: string | null | undefined;
-}) {
-  if (!value) {
-    return null;
-  }
-
-  return (
-    <div className="flex flex-col gap-0.5 sm:flex-row sm:gap-3">
-      <dt className="w-36 shrink-0 text-xs font-medium uppercase tracking-wide text-gray-500">
-        {label}
-      </dt>
-      <dd className="text-sm text-gray-800 wrap-break-word">{value}</dd>
-    </div>
-  );
-}
-
-function ProfileDetailsCard({ result }: { result: ProfileResult }) {
-  const accountType = result.accountType || 'Personal';
-  const showBusinessDescription =
-    Boolean(result.businessDescription) &&
-    result.businessDescription !== result.about;
-
-  return (
-    <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-4">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-        {result.hasProfilePic && result.profilePicUrl ? (
-          <ProfileAvatar
-            phone={result.phone}
-            profilePicUrl={result.profilePicUrl}
-            size="lg"
-          />
-        ) : (
-          <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border-2 border-dashed border-gray-300 bg-white text-xs text-gray-400">
-            No photo
-          </div>
-        )}
-
-        <div className="min-w-0 flex-1 space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-lg font-semibold text-gray-900">
-              {result.displayName || result.phone}
-            </h3>
-            <span
-              className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${accountTypeBadgeClass(accountType)}`}
-            >
-              {accountType}
-            </span>
-            {result.verifiedName && (
-              <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800">
-                Verified
-              </span>
-            )}
-            {result.fromCache && (
-              <span className="text-xs text-gray-400">(cached)</span>
-            )}
-          </div>
-
-          {result.displayName && result.displayName !== result.phone && (
-            <p className="text-sm text-gray-500">Input: {result.phone}</p>
-          )}
-
-          <dl className="grid gap-2">
-            <DetailRow label="Push name" value={result.pushname} />
-            <DetailRow label="Business name" value={result.businessTag} />
-            <DetailRow label="Saved name" value={result.name} />
-            <DetailRow label="Verified name" value={result.verifiedName} />
-            <DetailRow label="About" value={result.about} />
-            {showBusinessDescription && (
-              <DetailRow
-                label="Business description"
-                value={result.businessDescription}
-              />
-            )}
-            <DetailRow
-              label="Categories"
-              value={
-                result.businessCategories && result.businessCategories.length > 0
-                  ? result.businessCategories.join(', ')
-                  : null
-              }
-            />
-            <DetailRow label="Email" value={result.businessEmail} />
-            <DetailRow
-              label="Website"
-              value={
-                result.businessWebsite && result.businessWebsite.length > 0
-                  ? result.businessWebsite.join(', ')
-                  : null
-              }
-            />
-            <DetailRow label="Address" value={result.businessAddress} />
-            <DetailRow label="Resolved as" value={result.resolvedPhone} />
-            <DetailRow label="WhatsApp ID" value={result.whatsappId} />
-          </dl>
-
-          <div className="flex flex-wrap gap-2 pt-1">
-            {result.existsOnWhatsApp === false && (
-              <span className="rounded-md bg-amber-100 px-2 py-1 text-xs text-amber-800">
-                Not on WhatsApp
-              </span>
-            )}
-            {result.isMyContact && (
-              <span className="rounded-md bg-indigo-100 px-2 py-1 text-xs text-indigo-800">
-                In your contacts
-              </span>
-            )}
-            {result.isBusiness && (
-              <span className="rounded-md bg-emerald-100 px-2 py-1 text-xs text-emerald-800">
-                Business account
-              </span>
-            )}
-            {result.isEnterprise && (
-              <span className="rounded-md bg-purple-100 px-2 py-1 text-xs text-purple-800">
-                Enterprise account
-              </span>
-            )}
-            {result.success && !result.hasProfilePic && (
-              <span className="rounded-md bg-yellow-100 px-2 py-1 text-xs text-yellow-800">
-                {result.message || 'No profile picture'}
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
+type ConfirmState = {
+  open: boolean;
+  accountId: string;
+  mode: 'logout' | 'reset' | 'delete';
+};
 
 export default function Home() {
+  const { toast } = useToast();
+  const { entries, log, clear, hydrated } = useActivityLog();
+
   const [phoneNumber, setPhoneNumber] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [singleLoading, setSingleLoading] = useState(false);
+  const [batchLoading, setBatchLoading] = useState(false);
   const [result, setResult] = useState<ProfileResult | null>(null);
+  const [accounts, setAccounts] = useState<AccountStatus[]>([]);
+  const [batchChunkSize, setBatchChunkSize] = useState(1000);
+  const [apiChunkSize, setApiChunkSize] = useState(25);
+  const [logProgressInterval, setLogProgressInterval] = useState(10);
   const [clientReady, setClientReady] = useState(false);
-  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState('');
+  const [statusLoaded, setStatusLoaded] = useState(false);
+  const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState>({
+    open: false,
+    accountId: '1',
+    mode: 'logout',
+  });
   const [batchNumbers, setBatchNumbers] = useState('');
   const [batchResults, setBatchResults] = useState<BatchResult[]>([]);
-  const [statusMessage, setStatusMessage] = useState('Checking status...');
-  const [disconnecting, setDisconnecting] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({
+    total: 0,
+    completed: 0,
+  });
+
   const statusInFlight = useRef(false);
+  const [addingAccount, setAddingAccount] = useState(false);
+
+  const disconnecting = disconnectingId !== null;
+  const prevConnected = useRef<boolean | null>(null);
+
+  const anyLoading = singleLoading || batchLoading || disconnecting || addingAccount;
+  const batchProgressPercent =
+    batchProgress.total > 0
+      ? Math.round((batchProgress.completed / batchProgress.total) * 100)
+      : 0;
 
   const checkStatus = useCallback(async (signal?: AbortSignal) => {
     if (statusInFlight.current) {
@@ -245,16 +82,30 @@ export default function Home() {
 
       const payload = data as {
         ready?: unknown;
-        qrCodeDataUrl?: unknown;
+        readyCount?: unknown;
+        accounts?: unknown;
         message?: unknown;
         error?: unknown;
-        requiresQrScan?: unknown;
+        batchChunkSize?: unknown;
+        apiChunkSize?: unknown;
+        logProgressInterval?: unknown;
       };
 
-      setClientReady(payload.ready === true);
-      setQrCodeDataUrl(
-        typeof payload.qrCodeDataUrl === 'string' ? payload.qrCodeDataUrl : null,
-      );
+      const ready = payload.ready === true;
+      const accountList = Array.isArray(payload.accounts)
+        ? (payload.accounts as AccountStatus[])
+        : [];
+      setAccounts(accountList);
+      setClientReady(ready);
+      if (typeof payload.batchChunkSize === 'number') {
+        setBatchChunkSize(payload.batchChunkSize);
+      }
+      if (typeof payload.apiChunkSize === 'number') {
+        setApiChunkSize(payload.apiChunkSize);
+      }
+      if (typeof payload.logProgressInterval === 'number') {
+        setLogProgressInterval(payload.logProgressInterval);
+      }
       setStatusMessage(
         typeof payload.message === 'string'
           ? payload.message
@@ -277,17 +128,20 @@ export default function Home() {
 
       console.error('Error checking status:', error);
       setStatusMessage('Failed to check status');
+      log('error', 'Status check failed');
     } finally {
+      setStatusLoaded(true);
       statusInFlight.current = false;
     }
-  }, []);
+  }, [log]);
 
   useEffect(() => {
     const abort = new AbortController();
+    const pollMs = clientReady ? 5000 : 2500;
 
     const interval = window.setInterval(() => {
       void checkStatus(abort.signal);
-    }, 5000);
+    }, pollMs);
     const timeout = window.setTimeout(() => {
       void checkStatus(abort.signal);
     }, 0);
@@ -297,116 +151,270 @@ export default function Home() {
       window.clearInterval(interval);
       window.clearTimeout(timeout);
     };
-  }, [checkStatus]);
+  }, [checkStatus, clientReady]);
+
+  useEffect(() => {
+    if (prevConnected.current === null) {
+      prevConnected.current = clientReady;
+      return;
+    }
+    if (prevConnected.current !== clientReady) {
+      log(
+        clientReady ? 'success' : 'warning',
+        clientReady
+          ? 'WhatsApp connection is ready'
+          : 'WhatsApp disconnected or awaiting login',
+      );
+      prevConnected.current = clientReady;
+    }
+  }, [clientReady, log]);
+
+  const createFetchRun = async (
+    source: 'single' | 'batch' | 'csv',
+    totalCount: number,
+  ): Promise<string | null> => {
+    try {
+      const res = await fetch('/api/runs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, totalCount }),
+      });
+      const data: unknown = await res.json();
+      if (
+        typeof data === 'object' &&
+        data !== null &&
+        typeof (data as { run?: { id?: string } }).run?.id === 'string'
+      ) {
+        return (data as { run: { id: string } }).run.id;
+      }
+    } catch (error) {
+      console.error('Failed to create fetch run:', error);
+    }
+    return null;
+  };
 
   const fetchProfilePicture = async (phone: string) => {
     if (!phone.trim()) {
-      alert('Please enter a phone number');
+      toast('info', 'Please enter a phone number');
       return;
     }
 
-    setLoading(true);
+    setSingleLoading(true);
     setResult(null);
+    log('info', `Lookup started for ${phone.trim()}`);
+
     try {
+      const runId = await createFetchRun('single', 1);
+      const runQuery = runId ? `&runId=${encodeURIComponent(runId)}` : '';
       const res = await fetch(
-        `/api/whatsapp?phone=${encodeURIComponent(phone)}`,
+        `/api/whatsapp?phone=${encodeURIComponent(phone)}${runQuery}`,
       );
       const data: unknown = await res.json();
       if (typeof data !== 'object' || data === null) {
-        setResult({
-          phone,
-          success: false,
-          error: 'Unexpected response from server.',
-        });
+        const error = 'Unexpected response from server.';
+        setResult({ phone, success: false, error });
+        log('error', `Lookup failed for ${phone.trim()}: ${error}`);
+        toast('error', error);
         return;
       }
 
       const payload = data as ProfileResult & { error?: string };
       if (!res.ok && !payload.success) {
-        setResult({
-          phone,
-          success: false,
-          error: payload.error || `Request failed (${res.status})`,
-        });
+        const error = payload.error || `Request failed (${res.status})`;
+        setResult({ phone, success: false, error });
+        log('error', `Lookup failed for ${phone.trim()}: ${error}`);
+        toast('error', error);
         return;
       }
 
       setResult(payload);
+      const label = payload.displayName || payload.phone;
+      log(
+        'success',
+        `Lookup succeeded for ${phone.trim()} (${label})`,
+      );
+      toast('success', `Profile loaded for ${label}`);
+      if (runId) {
+        log('info', `Saved to History (run log ${runId})`);
+      }
     } catch (error) {
       console.error('Network error:', error);
-      setResult({
-        phone,
-        success: false,
-        error: 'Network error. Please try again.',
-      });
+      const message = 'Network error. Please try again.';
+      setResult({ phone, success: false, error: message });
+      log('error', `Lookup failed for ${phone.trim()}: network error`);
+      toast('error', message);
     } finally {
-      setLoading(false);
+      setSingleLoading(false);
     }
   };
 
-  const handleBatchFetch = async () => {
-    const phones = batchNumbers
-      .split('\n')
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
-
+  const handleBatchFetch = async (
+    phones: string[],
+    source: 'batch' | 'csv' = 'batch',
+  ) => {
     if (phones.length === 0) {
-      alert('Please enter at least one phone number per line');
+      toast('info', 'Add at least one phone number');
       return;
     }
 
-    setLoading(true);
+    setBatchLoading(true);
     setBatchResults([]);
+    setBatchProgress({ total: phones.length, completed: 0 });
+    log(
+      'info',
+      `Batch lookup started (${phones.length} numbers, ${batchChunkSize} per account)`,
+    );
+
+    const collected: BatchResult[] = [];
+    const runId = await createFetchRun(source, phones.length);
+    let lastLoggedAt = 0;
+
+    try {
+      for (let start = 0; start < phones.length; start += apiChunkSize) {
+        const chunk = phones.slice(start, start + apiChunkSize);
+        const res = await fetch('/api/whatsapp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'fetchMultiple',
+            phones: chunk,
+            startIndex: start,
+            runId,
+          }),
+        });
+        const data: unknown = await res.json();
+        if (typeof data !== 'object' || data === null) {
+          toast('error', 'Batch fetch failed: unexpected response');
+          log('error', 'Batch lookup failed: unexpected response');
+          return;
+        }
+
+        const payload = data as {
+          success?: unknown;
+          results?: unknown;
+          error?: unknown;
+        };
+
+        if (payload.success !== true || !Array.isArray(payload.results)) {
+          const errorText =
+            typeof payload.error === 'string' ? payload.error : 'Unknown error';
+          toast('error', `Batch fetch failed: ${errorText}`);
+          log('error', `Batch lookup failed: ${errorText}`);
+          return;
+        }
+
+        const chunkResults = payload.results as BatchResult[];
+        collected.push(...chunkResults);
+        setBatchResults([...collected]);
+        setBatchProgress({
+          total: phones.length,
+          completed: collected.length,
+        });
+
+        const completed = collected.length;
+        const shouldLogProgress =
+          completed - lastLoggedAt >= logProgressInterval ||
+          completed === phones.length;
+        if (shouldLogProgress) {
+          const sliceStart = Math.max(0, lastLoggedAt);
+          const recent = collected.slice(sliceStart);
+          const ok = recent.filter((row) => row.success).length;
+          const cached = recent.filter(
+            (row) => row.reusedFromDb || row.fromCache,
+          ).length;
+          log(
+            ok === recent.length ? 'success' : 'info',
+            `Progress ${completed}/${phones.length}: +${recent.length} processed (${ok} ok${cached > 0 ? `, ${cached} cached` : ''})`,
+          );
+          lastLoggedAt = completed;
+        }
+      }
+
+      const successCount = collected.filter((row) => row.success).length;
+      log(
+        successCount === collected.length ? 'success' : 'warning',
+        `Batch complete: ${successCount}/${collected.length} succeeded`,
+      );
+      toast(
+        successCount === collected.length ? 'success' : 'info',
+        `Processed ${collected.length} numbers (${successCount} succeeded)`,
+      );
+      if (runId) {
+        log('info', `Batch saved to History (run log ${runId})`);
+        toast('info', 'Results saved — open History to view the folder');
+      }
+    } catch (error) {
+      console.error('Batch fetch error:', error);
+      toast('error', 'Network error during batch fetch');
+      log('error', 'Batch lookup failed: network error');
+    } finally {
+      setBatchLoading(false);
+    }
+  };
+
+  const handleAddAccount = async () => {
+    setAddingAccount(true);
     try {
       const res = await fetch('/api/whatsapp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'fetchMultiple', phones }),
+        body: JSON.stringify({ action: 'addAccount' }),
       });
       const data: unknown = await res.json();
-      if (typeof data !== 'object' || data === null) {
-        alert('Batch fetch failed: unexpected response');
-        return;
-      }
+      const payload =
+        typeof data === 'object' && data !== null
+          ? (data as {
+              success?: boolean;
+              accounts?: AccountStatus[];
+              message?: string;
+              error?: string;
+              accountId?: string;
+            })
+          : {};
 
-      const payload = data as {
-        success?: unknown;
-        results?: unknown;
-        error?: unknown;
-      };
-
-      if (payload.success === true && Array.isArray(payload.results)) {
-        setBatchResults(payload.results as BatchResult[]);
+      if (payload.success && Array.isArray(payload.accounts)) {
+        setAccounts(payload.accounts);
+        toast('success', payload.message || `Account ${payload.accountId} added`);
+        log('info', `Added WhatsApp account slot ${payload.accountId}`);
       } else {
-        const errorText =
-          typeof payload.error === 'string' ? payload.error : 'Unknown error';
-        alert(`Batch fetch failed: ${errorText}`);
+        toast('error', payload.error || 'Failed to add account');
       }
+      await checkStatus();
     } catch (error) {
-      console.error('Batch fetch error:', error);
-      alert('Network error during batch fetch');
+      console.error('Add account error:', error);
+      toast('error', 'Failed to add account');
     } finally {
-      setLoading(false);
+      setAddingAccount(false);
     }
   };
 
-  const handleDisconnect = async (clearSession = true) => {
-    const confirmed = window.confirm(
-      clearSession
-        ? 'This will log out WhatsApp on this app, delete the saved session, and clear cached profiles. You will need to scan the QR code again. Continue?'
-        : 'This will restart the WhatsApp connection and clear cached profiles. Continue?',
-    );
-    if (!confirmed) {
-      return;
-    }
+  const requestDisconnect = (accountId: string) => {
+    const account = accounts.find((item) => item.accountId === accountId);
+    setConfirmState({
+      open: true,
+      accountId,
+      mode: account?.ready ? 'logout' : 'reset',
+    });
+  };
 
-    setDisconnecting(true);
+  const requestDeleteAccount = (accountId: string) => {
+    setConfirmState({ open: true, accountId, mode: 'delete' });
+  };
+
+  const handleConfirmAccountAction = async () => {
+    const { accountId, mode } = confirmState;
+    setDisconnectingId(accountId);
+
     try {
       const res = await fetch('/api/whatsapp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          clearSession ? { action: 'disconnect' } : { action: 'reset' },
+          mode === 'delete'
+            ? { action: 'deleteAccount', accountId }
+            : mode === 'reset'
+              ? { action: 'reset', accountId, clearSession: true }
+              : { action: 'disconnect', accountId },
         ),
       });
       const data: unknown = await res.json();
@@ -415,252 +423,260 @@ export default function Home() {
           ? (data as {
               message?: string;
               error?: string;
-              ready?: boolean;
-              qrCodeDataUrl?: string | null;
+              accounts?: AccountStatus[];
+              success?: boolean;
             })
           : {};
 
-      setClientReady(payload.ready === true);
-      setQrCodeDataUrl(
-        typeof payload.qrCodeDataUrl === 'string' ? payload.qrCodeDataUrl : null,
-      );
+      if (!res.ok || payload.success === false) {
+        toast('error', payload.error || 'Action failed');
+        log('error', payload.error || 'Account action failed');
+        return;
+      }
+
+      if (mode === 'delete' && Array.isArray(payload.accounts)) {
+        setAccounts(payload.accounts);
+      }
+
       setResult(null);
       setBatchResults([]);
+      setBatchProgress({ total: 0, completed: 0 });
       setStatusMessage(
         payload.message ||
-          (clearSession
-            ? 'Disconnected. Scan the QR code below to reconnect.'
-            : 'Client reset. Waiting for connection...'),
+          (mode === 'delete'
+            ? `Account ${accountId} deleted`
+            : mode === 'reset'
+              ? `Account ${accountId} reset. Wait for QR code.`
+              : `Account ${accountId} disconnected. Scan QR to reconnect.`),
+      );
+
+      log(
+        'info',
+        mode === 'delete'
+          ? `Deleted WhatsApp account slot ${accountId}`
+          : mode === 'reset'
+            ? `Reset WhatsApp account ${accountId}`
+            : `Logged out WhatsApp account ${accountId}`,
+      );
+      toast(
+        'success',
+        payload.message ||
+          (mode === 'delete'
+            ? `Account ${accountId} deleted`
+            : mode === 'reset'
+              ? `Account ${accountId} reset`
+              : `Account ${accountId} logged out`),
       );
 
       await new Promise((resolve) => {
         window.setTimeout(resolve, 1_500);
       });
-      await checkStatus();
+      try {
+        await checkStatus();
+      } catch (statusError) {
+        console.warn('Status refresh after account action failed:', statusError);
+      }
     } catch (error) {
-      console.error('Disconnect error:', error);
-      setStatusMessage('Failed to disconnect. Try again.');
+      console.error('Account action error:', error);
+      setStatusMessage(
+        confirmState.mode === 'delete'
+          ? 'Failed to delete account. Try again.'
+          : confirmState.mode === 'reset'
+            ? 'Failed to reset account. Try again.'
+            : 'Failed to disconnect. Try again.',
+      );
+      log(
+        'error',
+        confirmState.mode === 'delete'
+          ? `Delete failed for account ${accountId}`
+          : confirmState.mode === 'reset'
+            ? `Reset failed for account ${accountId}`
+            : `Disconnect failed for account ${accountId}`,
+      );
+      toast(
+        'error',
+        confirmState.mode === 'delete'
+          ? 'Failed to delete account. Try again.'
+          : confirmState.mode === 'reset'
+            ? 'Failed to reset account. Try again.'
+            : 'Failed to disconnect. Try again.',
+      );
     } finally {
-      setDisconnecting(false);
+      setDisconnectingId(null);
+      setConfirmState({ open: false, accountId: '1', mode: 'logout' });
     }
   };
 
   return (
-    <main className="min-h-screen p-4 md:p-8 bg-gray-50">
-      <div className="max-w-5xl mx-auto">
-        <div className="mb-6 flex items-start justify-between gap-4">
+    <>
+      {anyLoading && (
+        <div
+          className="fixed inset-x-0 top-0 z-40 border-b border-border bg-surface/95 px-4 py-2 backdrop-blur-sm"
+          aria-live="polite"
+        >
+          <ProgressBar
+            indeterminate={!batchLoading || batchProgress.total === 0}
+            value={batchLoading ? batchProgressPercent : undefined}
+            label={
+              batchLoading && batchProgress.total > 0
+                ? `Processing batch: ${batchProgress.completed} of ${batchProgress.total}`
+                : disconnecting
+                  ? confirmState.mode === 'delete'
+                    ? 'Deleting account...'
+                    : confirmState.mode === 'reset'
+                      ? 'Resetting account...'
+                      : 'Logging out...'
+                  : 'Fetching profile...'
+            }
+          />
+        </div>
+      )}
+
+      <div className="app-shell-header border-b border-white/10 px-4 py-8 text-white md:px-8">
+        <div className="mx-auto flex max-w-6xl flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <h1 className="text-3xl font-bold text-gray-800 mb-2">
+            <p className="text-xs font-medium uppercase tracking-widest text-white/70">
+              Profile intelligence
+            </p>
+            <h1 className="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">
               WhatsApp Profile Fetcher
             </h1>
-            <p className="text-gray-600">
-              Fetch profile pictures, names, about text, and business details
-              from phone numbers
+            <p className="mt-2 max-w-2xl text-sm text-white/80 sm:text-base">
+              Multi-account batch lookups with CSV import. Each number is saved
+              with full profile details in History.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              void handleDisconnect(true);
-            }}
-            disabled={disconnecting}
-            className="shrink-0 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {disconnecting
-              ? 'Disconnecting...'
-              : clientReady
-                ? 'Logout'
-                : 'Disconnect & Reconnect'}
-          </button>
-        </div>
-
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-lg font-semibold mb-3 flex items-center gap-2 text-gray-800">
-            WhatsApp Connection
-            <span
-              className={`inline-block w-3 h-3 rounded-full ${clientReady ? 'bg-green-500' : 'bg-yellow-500'}`}
-            />
-          </h2>
-          <div className="flex flex-wrap items-center gap-3">
-            <span
-              className={`px-3 py-1 rounded-full text-sm ${clientReady ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}
-            >
-              {clientReady ? 'Connected' : 'Not connected'}
-            </span>
-            <span className="text-sm text-gray-600">{statusMessage}</span>
-            <button
-              type="button"
-              onClick={() => {
-                void checkStatus();
-              }}
-              disabled={disconnecting}
-              className="text-blue-600 hover:text-blue-800 text-sm underline disabled:opacity-50"
-            >
-              Refresh status
-            </button>
-          </div>
-
-          {!clientReady && (
-            <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
-              <p className="text-sm text-amber-900">
-                Stuck on &quot;Connecting...&quot; or logged in a long time ago?
-                Use <strong>Disconnect &amp; Reconnect</strong> in the top right
-                corner, then scan the new QR code.
-              </p>
-            </div>
-          )}
-
-          {!clientReady && qrCodeDataUrl && (
-            <div className="mt-4 p-4 bg-gray-100 rounded-lg">
-              <p className="text-sm text-gray-600 mb-2">
-                Scan this QR code with your WhatsApp mobile app:
-              </p>
-              <div className="bg-white p-2 inline-block rounded shadow">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={qrCodeDataUrl}
-                  alt="WhatsApp QR Code"
-                  className="w-48 h-48"
-                />
-              </div>
-              <p className="text-xs text-gray-500 mt-2">
-                Open WhatsApp → Menu → Linked Devices → Link a Device
-              </p>
-            </div>
-          )}
-        </div>
-
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-lg font-semibold mb-3 text-gray-800">
-            Single Number Lookup
-          </h2>
-          <div className="flex flex-col sm:flex-row gap-3">
-            <input
-              type="text"
-              value={phoneNumber}
-              onChange={(event) => setPhoneNumber(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  void fetchProfilePicture(phoneNumber);
-                }
-              }}
-              placeholder="Enter phone (e.g. 03110365141 or 923110365141)"
-              className="flex-1 px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
-              disabled={!clientReady}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                void fetchProfilePicture(phoneNumber);
-              }}
-              disabled={!phoneNumber.trim() || !clientReady || loading}
-              className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-            >
-              {loading ? 'Loading...' : 'Fetch'}
-            </button>
-          </div>
-
-          {result && (
-            <div className="mt-4">
-              {result.success ? (
-                <ProfileDetailsCard result={result} />
-              ) : (
-                <div className="rounded-xl border border-red-200 bg-red-50 p-4">
-                  <p className="text-red-600 font-medium">Error</p>
-                  <p className="text-sm text-red-500 mt-1">{result.error}</p>
-                  {result.resolvedPhone && (
-                    <p className="text-xs text-gray-500 mt-1">
-                      Looked up as {result.resolvedPhone}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h2 className="text-lg font-semibold mb-3 text-gray-800">
-            Batch Lookup (One per line)
-          </h2>
-          <textarea
-            value={batchNumbers}
-            onChange={(event) => setBatchNumbers(event.target.value)}
-            placeholder={
-              'Enter phone numbers (one per line)\ne.g.,\n03110365141\n923110365141'
-            }
-            className="w-full px-4 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
-            rows={5}
-            disabled={!clientReady}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              void handleBatchFetch();
-            }}
-            disabled={!batchNumbers.trim() || !clientReady || loading}
-            className="mt-3 px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-          >
-            {loading ? 'Fetching...' : 'Fetch All'}
-          </button>
-
-          {batchResults.length > 0 && (
-            <div className="mt-4 space-y-4">
-              <p className="text-sm text-gray-500">
-                {batchResults.length} result
-                {batchResults.length === 1 ? '' : 's'}
-              </p>
-              {batchResults.map((row, index) => (
-                <div key={`${row.phone}-${index}`}>
-                  {row.success ? (
-                    <ProfileDetailsCard result={row} />
-                  ) : (
-                    <div className="rounded-xl border border-red-200 bg-red-50 p-4">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="font-medium text-gray-900">{row.phone}</p>
-                        <span className="text-xs font-medium text-red-600">
-                          Failed
-                        </span>
-                      </div>
-                      <p className="text-sm text-red-500 mt-1">{row.error}</p>
-                      {row.resolvedPhone && (
-                        <p className="text-xs text-gray-500 mt-1">
-                          Looked up as {row.resolvedPhone}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="mt-8 p-4 bg-red-50 border border-red-200 rounded-lg">
-          <h3 className="font-semibold text-red-800">Important Disclaimer</h3>
-          <ul className="text-sm text-red-600 mt-1 list-disc list-inside space-y-1">
-            <li>
-              This tool uses unofficial methods and violates WhatsApp&apos;s
-              Terms of Service.
-            </li>
-            <li>
-              Your WhatsApp account may be <strong>permanently banned</strong>.
-            </li>
-            <li>
-              This is for educational purposes only -{' '}
-              <strong>do not use in production</strong>.
-            </li>
-            <li>
-              Privacy: fetching profile pictures without consent may be illegal
-              in your jurisdiction.
-            </li>
-            <li>
-              Avoid bulk lookups. Batch mode inserts a short delay between
-              requests to reduce load, but it is still risky.
-            </li>
-          </ul>
+          <AppNav />
         </div>
       </div>
-    </main>
+
+      <main className="px-4 pb-10 pt-6 md:px-8">
+        <div className="mx-auto flex max-w-6xl flex-col gap-6">
+          <WhatsAppAccountsCard
+            accounts={
+              accounts.length > 0
+                ? accounts
+                : statusLoaded
+                  ? [
+                      {
+                        accountId: '1',
+                        ready: false,
+                        authenticated: false,
+                        connectedPhone: null,
+                        loadingPercent: null,
+                        qrCodeDataUrl: null,
+                        lastError: null,
+                        requiresQrScan: false,
+                        initialized: false,
+                        startupPhase: 'idle',
+                      },
+                    ]
+                  : []
+            }
+            batchChunkSize={batchChunkSize}
+            loading={!statusLoaded}
+            addingAccount={addingAccount}
+            disconnectingId={disconnectingId}
+            onRefresh={() => {
+              void checkStatus();
+            }}
+            onAddAccount={() => {
+              void handleAddAccount();
+            }}
+            onLogout={requestDisconnect}
+            onDelete={requestDeleteAccount}
+          />
+
+          <div className="grid items-start gap-6 lg:grid-cols-[1fr_22rem] xl:grid-cols-[1fr_24rem]">
+            <LookupPanel
+              clientReady={clientReady}
+              phoneNumber={phoneNumber}
+              onPhoneNumberChange={setPhoneNumber}
+              batchNumbers={batchNumbers}
+              onBatchNumbersChange={setBatchNumbers}
+              singleLoading={singleLoading}
+              batchLoading={batchLoading}
+              result={result}
+              batchResults={batchResults}
+              batchProgress={batchProgress}
+              onSingleFetch={() => {
+                void fetchProfilePicture(phoneNumber);
+              }}
+              onBatchFetch={(phones, source) => {
+                void handleBatchFetch(phones, source);
+              }}
+            />
+
+            <aside className="flex flex-col gap-6 lg:sticky lg:top-6">
+              <ActivityLog entries={entries} onClear={clear} hydrated={hydrated} />
+            </aside>
+          </div>
+
+          <Card
+            accent="default"
+            title="Important disclaimer"
+            description="Educational use only"
+          >
+            <ul className="list-disc space-y-2 pl-5 text-sm text-foreground-muted">
+              <li>
+                This tool uses unofficial methods and violates WhatsApp&apos;s
+                Terms of Service.
+              </li>
+              <li>
+                Your WhatsApp account may be{' '}
+                <strong className="text-foreground">permanently banned</strong>.
+              </li>
+              <li>
+                For educational purposes only —{' '}
+                <strong className="text-foreground">do not use in production</strong>.
+              </li>
+              <li>
+                Fetching profile pictures without consent may be illegal in your
+                jurisdiction.
+              </li>
+              <li>
+                Avoid bulk lookups. Batch mode adds delay between requests but
+                remains risky.
+              </li>
+            </ul>
+          </Card>
+        </div>
+      </main>
+
+      <ConfirmModal
+        open={confirmState.open}
+        title={
+          confirmState.mode === 'delete'
+            ? `Delete account ${confirmState.accountId}?`
+            : confirmState.mode === 'reset'
+              ? `Reset account ${confirmState.accountId}?`
+              : `Logout account ${confirmState.accountId}?`
+        }
+        message={
+          confirmState.mode === 'delete'
+            ? 'This will log out WhatsApp, delete the saved session, and remove this account slot permanently.'
+            : confirmState.mode === 'reset'
+              ? 'This clears the session and restarts pairing. Use this if the account is stuck on "Starting" without a QR code.'
+              : 'This will log out that WhatsApp account, delete its saved session, and require a new QR scan for that slot.'
+        }
+        confirmLabel={
+          confirmState.mode === 'delete'
+            ? 'DELETE'
+            : confirmState.mode === 'reset'
+              ? 'RESET'
+              : 'LOGOUT'
+        }
+        variant="danger"
+        loading={disconnecting}
+        onConfirm={() => {
+          void handleConfirmAccountAction();
+        }}
+        onCancel={() => {
+          if (!disconnecting) {
+            setConfirmState({ open: false, accountId: '1', mode: 'logout' });
+          }
+        }}
+      />
+    </>
   );
 }

@@ -44,3 +44,6 @@ next-env.d.ts
 # WhatsApp Web.js session / cache (contains login credentials)
 .wwebjs_auth
 .wwebjs_cache
+
+# SQLite DB + saved fetch folders
+/data/

@@ -14,6 +14,8 @@ Educational Next.js app that fetches WhatsApp profile picture URLs from phone nu
 - Persistent login session (saved locally)
 - In-memory caching of profile picture URLs
 - Pakistan-friendly number formatting (`0311…` → `92311…`)
+- Public Ocean API (`/api/v1`) with API keys — see `/docs` after starting the app
+- SQLite queue + always-on worker (50 per WhatsApp, 20 min rest; skip if already stored)
 
 ---
 
@@ -24,6 +26,7 @@ Educational Next.js app that fetches WhatsApp profile picture URLs from phone nu
 | Framework | Next.js 16, React 19, TypeScript |
 | Styling | Tailwind CSS 4 |
 | WhatsApp | whatsapp-web.js (+ Puppeteer / Chrome) |
+| Database | SQLite (`data/app.db`) for profiles, queue, API keys, and jobs |
 | QR codes | qrcode (UI), qrcode-terminal (terminal) |
 
 ---

@@ -7,6 +7,7 @@ const nextConfig: NextConfig = {
     "puppeteer",
     "qrcode-terminal",
     "qrcode",
+    "sql.js",
   ],
 };
 

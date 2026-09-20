@@ -4,14 +4,16 @@ import fs from "fs";
 import path from "path";
 import QRCode from "qrcode";
 import qrcodeTerminal from "qrcode-terminal";
-import { Client, LocalAuth } from "whatsapp-web.js";
+import type { Client } from "whatsapp-web.js";
 import { getErrorMessage } from "@/lib/errors";
+import { getAccountIds } from "@/lib/account-pool";
 import { sanitizePersonName } from "@/lib/profile-names";
 
 type WhatsAppRuntimeState = {
   client: Client | null;
   isReady: boolean;
   authenticated: boolean;
+  connectedPhone: string | null;
   loadingPercent: number | null;
   qrCode: string | null;
   qrCodeDataUrl: string | null;
@@ -23,30 +25,53 @@ type WhatsAppRuntimeState = {
 };
 
 const RETRY_COOLDOWN_MS = 15_000;
-const READY_FALLBACK_MS = 4_000;
+const READY_FALLBACK_MS = 2_500;
+const INIT_TIMEOUT_MS = Number.parseInt(
+  process.env.WWJS_INIT_TIMEOUT_MS || "120000",
+  10,
+);
+const STUCK_STARTUP_MS = Number.parseInt(
+  process.env.WWJS_STUCK_STARTUP_MS || "90000",
+  10,
+);
+
+const recoveringAccounts = new Set<string>();
+
+const DEFAULT_ACCOUNT_ID = "1";
 
 const globalForWhatsApp = globalThis as typeof globalThis & {
-  __whatsappProfileFetcher?: WhatsAppRuntimeState;
+  __whatsappProfileFetchers?: Map<string, WhatsAppRuntimeState>;
+  __whatsappShutdownFlags?: Map<string, boolean>;
 };
 
-function getRuntimeState(): WhatsAppRuntimeState {
-  if (!globalForWhatsApp.__whatsappProfileFetcher) {
-    globalForWhatsApp.__whatsappProfileFetcher = {
-      client: null,
-      isReady: false,
-      authenticated: false,
-      loadingPercent: null,
-      qrCode: null,
-      qrCodeDataUrl: null,
-      startPromise: null,
-      lastError: null,
-      lastAttemptAt: null,
-      readyFallbackTimer: null,
-      requiresQrScan: false,
-    };
+function createInitialState(): WhatsAppRuntimeState {
+  return {
+    client: null,
+    isReady: false,
+    authenticated: false,
+    connectedPhone: null,
+    loadingPercent: null,
+    qrCode: null,
+    qrCodeDataUrl: null,
+    startPromise: null,
+    lastError: null,
+    lastAttemptAt: null,
+    readyFallbackTimer: null,
+    requiresQrScan: false,
+  };
+}
+
+function getRuntimeState(accountId = DEFAULT_ACCOUNT_ID): WhatsAppRuntimeState {
+  if (!globalForWhatsApp.__whatsappProfileFetchers) {
+    globalForWhatsApp.__whatsappProfileFetchers = new Map();
   }
 
-  const state = globalForWhatsApp.__whatsappProfileFetcher;
+  let state = globalForWhatsApp.__whatsappProfileFetchers.get(accountId);
+  if (!state) {
+    state = createInitialState();
+    globalForWhatsApp.__whatsappProfileFetchers.set(accountId, state);
+  }
+
   if (typeof state.authenticated !== "boolean") {
     state.authenticated = false;
   }
@@ -59,13 +84,28 @@ function getRuntimeState(): WhatsAppRuntimeState {
   if (typeof state.requiresQrScan !== "boolean") {
     state.requiresQrScan = false;
   }
+  if (state.connectedPhone === undefined) {
+    state.connectedPhone = null;
+  }
   return state;
 }
 
-function resolveSessionDir(): string {
+function isAccountShuttingDown(accountId: string): boolean {
+  return globalForWhatsApp.__whatsappShutdownFlags?.get(accountId) ?? false;
+}
+
+function setAccountShuttingDown(accountId: string, value: boolean): void {
+  if (!globalForWhatsApp.__whatsappShutdownFlags) {
+    globalForWhatsApp.__whatsappShutdownFlags = new Map();
+  }
+  globalForWhatsApp.__whatsappShutdownFlags.set(accountId, value);
+}
+
+function resolveSessionDir(accountId = DEFAULT_ACCOUNT_ID): string {
   const raw = process.env.WWJS_SESSION_DIR || ".wwebjs_auth";
   const cwd = process.cwd();
-  const resolved = path.resolve(cwd, raw);
+  const base = path.resolve(cwd, raw);
+  const resolved = path.resolve(base, `account-${accountId}`);
   const relative = path.relative(cwd, resolved);
 
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -75,39 +115,265 @@ function resolveSessionDir(): string {
   return resolved;
 }
 
-function ensureSessionDirectory(): string {
-  const sessionDir = resolveSessionDir();
+function ensureSessionDirectory(accountId = DEFAULT_ACCOUNT_ID): string {
+  const sessionDir = resolveSessionDir(accountId);
   if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
   }
   return sessionDir;
 }
 
-function clearReadyFallbackTimer(): void {
-  const state = getRuntimeState();
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+let clientShutdownInProgress = false; // legacy; per-account flags used instead
+
+function localAuthSessionRoots(accountId = DEFAULT_ACCOUNT_ID): string[] {
+  const base = resolveSessionDir(accountId);
+  return [
+    path.join(base, "session"),
+    path.join(base, `session-wa-account-${accountId}`),
+    path.join(base, `session-wa-account-${accountId}`, "Default"),
+  ];
+}
+
+function clearChromiumSingletonLock(accountId = DEFAULT_ACCOUNT_ID): void {
+  const removeCandidate = (candidate: string) => {
+    try {
+      if (!fs.existsSync(candidate)) {
+        return;
+      }
+      const stat = fs.lstatSync(candidate);
+      if (stat.isDirectory()) {
+        fs.rmSync(candidate, { recursive: true, force: true });
+      } else {
+        fs.unlinkSync(candidate);
+      }
+    } catch {
+      try {
+        fs.rmSync(candidate, { force: true, maxRetries: 2, retryDelay: 100 });
+      } catch {
+        // Ignore — another process may still hold the lock.
+      }
+    }
+  };
+
+  const lockNames = [
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    "lockfile",
+  ];
+
+  for (const sessionRoot of localAuthSessionRoots(accountId)) {
+    for (const name of lockNames) {
+      removeCandidate(path.join(sessionRoot, name));
+    }
+
+    try {
+      if (!fs.existsSync(sessionRoot)) {
+        continue;
+      }
+      for (const entry of fs.readdirSync(sessionRoot)) {
+        if (entry.startsWith("Singleton")) {
+          removeCandidate(path.join(sessionRoot, entry));
+        }
+      }
+    } catch {
+      // Ignore directory read errors.
+    }
+  }
+}
+
+function isChromiumProfileLockError(message: string): boolean {
+  return /profile appears to be in use|process_singleton|singleton|already running for/i.test(
+    message,
+  );
+}
+
+async function closeBrowserForClient(
+  client: Client,
+  accountId = DEFAULT_ACCOUNT_ID,
+): Promise<void> {
+  try {
+    const browser = client.pupBrowser;
+    if (browser) {
+      const pages = await browser.pages();
+      for (const page of pages) {
+        await page.close().catch(() => undefined);
+      }
+      await browser.close().catch(() => undefined);
+    }
+  } catch {
+    // Ignore Puppeteer shutdown errors.
+  }
+
+  try {
+    await client.destroy();
+  } catch {
+    // destroy() may fail if the browser is already gone.
+  }
+
+  if (process.platform === "win32") {
+    await sleep(800);
+  } else {
+    await sleep(200);
+  }
+
+  clearChromiumSingletonLock(accountId);
+}
+
+async function removeSessionDirectoryWithRetry(
+  sessionDir: string,
+  accountId = DEFAULT_ACCOUNT_ID,
+): Promise<void> {
+  const attempts = process.platform === "win32" ? 8 : 4;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      if (fs.existsSync(sessionDir)) {
+        fs.rmSync(sessionDir, {
+          recursive: true,
+          force: true,
+          maxRetries: 3,
+          retryDelay: 200,
+        });
+      }
+      return;
+    } catch (error: unknown) {
+      if (attempt === attempts - 1) {
+        console.warn(
+          "Could not fully remove WhatsApp session directory:",
+          getErrorMessage(error),
+        );
+        return;
+      }
+      await sleep(300 * (attempt + 1));
+      clearChromiumSingletonLock(accountId);
+    }
+  }
+}
+
+function clearReadyFallbackTimer(accountId = DEFAULT_ACCOUNT_ID): void {
+  const state = getRuntimeState(accountId);
   if (state.readyFallbackTimer) {
     clearTimeout(state.readyFallbackTimer);
     state.readyFallbackTimer = null;
   }
 }
 
-function hasPersistedSession(): boolean {
+function hasPersistedSession(accountId = DEFAULT_ACCOUNT_ID): boolean {
   try {
-    const sessionDir = path.join(resolveSessionDir(), "session");
-    return fs.existsSync(path.join(sessionDir, "Default"));
+    const base = resolveSessionDir(accountId);
+    const candidates = [
+      path.join(base, "session", "Default"),
+      path.join(base, `session-wa-account-${accountId}`, "Default"),
+    ];
+    return candidates.some((candidate) => fs.existsSync(candidate));
   } catch {
     return false;
   }
 }
 
-function resetRuntimeState(preserveError = false): void {
-  const state = getRuntimeState();
+function isAccountStartupStuck(accountId = DEFAULT_ACCOUNT_ID): boolean {
+  const state = getRuntimeState(accountId);
+  if (!state.lastAttemptAt) {
+    return false;
+  }
+  if (state.isReady || state.qrCode || state.qrCodeDataUrl) {
+    return false;
+  }
+
+  const elapsed = Date.now() - state.lastAttemptAt;
+  if (elapsed < STUCK_STARTUP_MS) {
+    return false;
+  }
+
+  return Boolean(state.startPromise || state.client);
+}
+
+async function forceRestartStuckAccount(
+  accountId = DEFAULT_ACCOUNT_ID,
+): Promise<void> {
+  if (isAccountShuttingDown(accountId)) {
+    return;
+  }
+
+  const state = getRuntimeState(accountId);
+  const elapsed = state.lastAttemptAt
+    ? Date.now() - state.lastAttemptAt
+    : 0;
+  console.warn(
+    `Account ${accountId} stuck without QR for ${elapsed}ms — forcing browser restart`,
+  );
+
+  setAccountShuttingDown(accountId, true);
+  clearReadyFallbackTimer(accountId);
+
+  const existing = state.client;
+  const pendingStart = state.startPromise;
+  if (pendingStart) {
+    await Promise.race([pendingStart, sleep(10_000)]);
+  }
+
+  if (existing) {
+    await closeBrowserForClient(existing, accountId);
+  } else {
+    clearChromiumSingletonLock(accountId);
+  }
+
+  resetRuntimeState(accountId, false);
+  const next = getRuntimeState(accountId);
+  next.lastError = "Restarting browser — waiting for QR code...";
+  next.lastAttemptAt = null;
+  setAccountShuttingDown(accountId, false);
+  ensureClientStarted(accountId);
+}
+
+async function safeGetClientState(
+  client: Client,
+  timeoutMs = 2_500,
+): Promise<string | null> {
+  try {
+    const state = await Promise.race([
+      client.getState(),
+      new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+    return typeof state === "string" ? state : null;
+  } catch {
+    return null;
+  }
+}
+
+function readConnectedPhone(client: Client): string | null {
+  try {
+    const user = client.info?.wid?.user;
+    if (typeof user === "string" && user.trim().length > 0) {
+      return user.trim();
+    }
+  } catch {
+    // Client info may not be available yet.
+  }
+  return null;
+}
+
+function resetRuntimeState(
+  accountId = DEFAULT_ACCOUNT_ID,
+  preserveError = false,
+): void {
+  const state = getRuntimeState(accountId);
   const lastError = preserveError ? state.lastError : null;
   const lastAttemptAt = preserveError ? state.lastAttemptAt : null;
-  clearReadyFallbackTimer();
+  clearReadyFallbackTimer(accountId);
   state.client = null;
   state.isReady = false;
   state.authenticated = false;
+  state.connectedPhone = null;
   state.loadingPercent = null;
   state.qrCode = null;
   state.qrCodeDataUrl = null;
@@ -117,24 +383,25 @@ function resetRuntimeState(preserveError = false): void {
   state.lastAttemptAt = lastAttemptAt;
 }
 
-function isCurrentClient(client: Client): boolean {
-  return getRuntimeState().client === client;
+function isCurrentClient(client: Client, accountId: string): boolean {
+  return getRuntimeState(accountId).client === client;
 }
 
-function markReady(client: Client, source: string): void {
-  if (!isCurrentClient(client)) {
+function markReady(client: Client, source: string, accountId: string): void {
+  if (!isCurrentClient(client, accountId)) {
     return;
   }
-  const state = getRuntimeState();
-  clearReadyFallbackTimer();
+  const state = getRuntimeState(accountId);
+  clearReadyFallbackTimer(accountId);
   state.isReady = true;
   state.authenticated = true;
+  state.connectedPhone = readConnectedPhone(client);
   state.qrCode = null;
   state.qrCodeDataUrl = null;
   state.lastError = null;
   state.loadingPercent = null;
   state.requiresQrScan = false;
-  console.log(`WhatsApp client is ready (${source}).`);
+  console.log(`WhatsApp client is ready (${source}, account ${accountId}).`);
 }
 
 function resolveChromeExecutable(): string | undefined {
@@ -161,68 +428,117 @@ function resolveChromeExecutable(): string | undefined {
   return candidates.find((candidate) => candidate && fs.existsSync(candidate));
 }
 
-async function launchClient(): Promise<void> {
-  const state = getRuntimeState();
-  const sessionDir = ensureSessionDirectory();
+async function launchClient(accountId = DEFAULT_ACCOUNT_ID): Promise<void> {
+  const state = getRuntimeState(accountId);
+  const sessionDir = ensureSessionDirectory(accountId);
   const executablePath = resolveChromeExecutable();
 
-  const client = new Client({
+  const lowMemory = process.env.WWJS_LOW_MEMORY === "1";
+  const puppeteerArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-accelerated-2d-canvas",
+    "--disable-gpu",
+    "--disable-crash-reporter",
+    "--disable-breakpad",
+    "--disable-features=Crashpad",
+    "--headless=new",
+    "--disable-extensions",
+    "--mute-audio",
+    "--no-first-run",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--disable-translate",
+  ];
+  if (process.platform === "linux") {
+    puppeteerArgs.push(
+      "--disable-background-networking",
+      "--disable-renderer-backgrounding",
+      "--disable-backgrounding-occluded-windows",
+    );
+    puppeteerArgs.push("--no-zygote");
+    if (lowMemory) {
+      puppeteerArgs.push(
+        "--renderer-process-limit=1",
+        "--js-flags=--max-old-space-size=384",
+      );
+    }
+    if (process.env.WWJS_SINGLE_PROCESS === "1") {
+      console.warn(
+        `Account ${accountId}: WWJS_SINGLE_PROCESS=1 — may segfault on some VPS hosts`,
+      );
+      puppeteerArgs.push("--single-process");
+    }
+  } else {
+    puppeteerArgs.push("--disable-software-rasterizer", "--no-zygote");
+  }
+
+  if (!executablePath || !fs.existsSync(executablePath)) {
+    throw new Error(
+      `Chromium not found at ${executablePath ?? "(unset)"}. Set PUPPETEER_EXECUTABLE_PATH.`,
+    );
+  }
+
+  console.log(
+    `Launching WhatsApp browser for account ${accountId} (${executablePath})`,
+  );
+
+  const { Client: WhatsAppClient, LocalAuth } = await import("whatsapp-web.js");
+
+  const client = new WhatsAppClient({
     authStrategy: new LocalAuth({
       dataPath: sessionDir,
+      clientId: `wa-account-${accountId}`,
     }),
     puppeteer: {
       headless: true,
       executablePath,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--disable-gpu",
-      ],
+      args: puppeteerArgs,
+      dumpio: process.env.WWJS_DEBUG === "1",
     },
   });
 
   state.client = client;
 
   client.on("qr", (qr: string) => {
-    if (!isCurrentClient(client)) {
+    if (!isCurrentClient(client, accountId)) {
       return;
     }
-    const current = getRuntimeState();
+    const current = getRuntimeState(accountId);
     current.qrCode = qr;
     current.requiresQrScan = true;
     current.isReady = false;
     current.lastError = null;
-    console.log("QR Code received. Scan with WhatsApp:");
+    console.log(`QR Code received (account ${accountId}). Scan with WhatsApp:`);
     qrcodeTerminal.generate(qr, { small: true });
 
     void QRCode.toDataURL(qr, { width: 220, margin: 1 })
       .then((dataUrl) => {
-        if (isCurrentClient(client)) {
-          getRuntimeState().qrCodeDataUrl = dataUrl;
+        if (isCurrentClient(client, accountId)) {
+          getRuntimeState(accountId).qrCodeDataUrl = dataUrl;
         }
       })
       .catch((error: unknown) => {
         console.error("Failed to render QR image:", error);
-        if (isCurrentClient(client)) {
-          getRuntimeState().qrCodeDataUrl = null;
+        if (isCurrentClient(client, accountId)) {
+          getRuntimeState(accountId).qrCodeDataUrl = null;
         }
       });
   });
 
   client.on("loading_screen", (percent: number) => {
-    if (!isCurrentClient(client)) {
+    if (!isCurrentClient(client, accountId)) {
       return;
     }
-    getRuntimeState().loadingPercent = percent;
+    getRuntimeState(accountId).loadingPercent = percent;
   });
 
   client.on("authenticated", () => {
-    if (!isCurrentClient(client)) {
+    if (!isCurrentClient(client, accountId)) {
       return;
     }
-    const current = getRuntimeState();
+    const current = getRuntimeState(accountId);
     current.authenticated = true;
     current.qrCode = null;
     current.qrCodeDataUrl = null;
@@ -231,46 +547,76 @@ async function launchClient(): Promise<void> {
 
     // Current whatsapp-web.js can emit authenticated and then throw before
     // 'ready' (LID / ClientInfo). Unlock the UI if ready never arrives.
-    clearReadyFallbackTimer();
+    clearReadyFallbackTimer(accountId);
     current.readyFallbackTimer = setTimeout(() => {
-      markReady(client, "authenticated-fallback");
+      markReady(client, "authenticated-fallback", accountId);
     }, READY_FALLBACK_MS);
   });
 
   client.on("ready", () => {
-    markReady(client, "ready-event");
+    markReady(client, "ready-event", accountId);
   });
 
   client.on("auth_failure", (msg: string) => {
-    if (!isCurrentClient(client)) {
+    if (!isCurrentClient(client, accountId)) {
       return;
     }
     console.error("Authentication failed:", msg);
-    getRuntimeState().lastError = `Authentication failed: ${msg}`;
-    void client.destroy().catch(() => undefined);
-    resetRuntimeState(true);
+    getRuntimeState(accountId).lastError = `Authentication failed: ${msg}`;
+    void closeBrowserForClient(client, accountId).finally(() => {
+      resetRuntimeState(accountId, true);
+    });
   });
 
   client.on("disconnected", (reason: string) => {
-    if (!isCurrentClient(client)) {
+    if (!isCurrentClient(client, accountId) || isAccountShuttingDown(accountId)) {
       return;
     }
     console.log("Client disconnected:", reason);
-    getRuntimeState().lastError = `Client disconnected: ${String(reason)}`;
-    resetRuntimeState(true);
+    getRuntimeState(accountId).lastError = `Client disconnected: ${String(reason)}`;
+    void closeBrowserForClient(client, accountId).finally(() => {
+      resetRuntimeState(accountId, true);
+      if (String(reason).toUpperCase() === "LOGOUT") {
+        getRuntimeState(accountId).requiresQrScan = true;
+      }
+    });
   });
 
-  await client.initialize();
+  clearChromiumSingletonLock(accountId);
+
+  const initPromise = client.initialize();
+  await Promise.race([
+    initPromise,
+    sleep(INIT_TIMEOUT_MS).then(() => {
+      throw new Error(
+        `WhatsApp initialize timed out after ${Math.round(INIT_TIMEOUT_MS / 1000)}s`,
+      );
+    }),
+  ]);
 }
 
 /**
  * Starts Puppeteer / WhatsApp Web in the background.
  * Does not wait for the user to scan the QR code.
  */
-export function ensureClientStarted(): void {
-  const state = getRuntimeState();
+export function ensureClientStarted(accountId = DEFAULT_ACCOUNT_ID): void {
+  const state = getRuntimeState(accountId);
   if (state.client || state.startPromise) {
+    if (
+      isAccountStartupStuck(accountId) &&
+      !recoveringAccounts.has(accountId)
+    ) {
+      recoveringAccounts.add(accountId);
+      void forceRestartStuckAccount(accountId).finally(() => {
+        recoveringAccounts.delete(accountId);
+      });
+    }
     return;
+  }
+
+  if (state.lastError && isChromiumProfileLockError(state.lastError)) {
+    clearChromiumSingletonLock(accountId);
+    state.lastAttemptAt = null;
   }
 
   const now = Date.now();
@@ -283,133 +629,225 @@ export function ensureClientStarted(): void {
   }
 
   state.lastAttemptAt = now;
-  state.startPromise = launchClient()
+
+  state.startPromise = launchClient(accountId)
     .then(() => {
-      const current = getRuntimeState();
+      const current = getRuntimeState(accountId);
       if (current.isReady || current.qrCode || current.authenticated) {
         current.lastError = null;
       }
     })
-    .catch((error: unknown) => {
+    .catch(async (error: unknown) => {
       const message = getErrorMessage(error);
-      console.error("WhatsApp client failed to start:", error);
-      const current = getRuntimeState();
+      console.error(`WhatsApp client failed to start (account ${accountId}):`, error);
+      const current = getRuntimeState(accountId);
       const existing = current.client;
       current.lastError = message;
       current.lastAttemptAt = Date.now();
-      resetRuntimeState(true);
       if (existing) {
-        existing.removeAllListeners();
-        void existing.destroy().catch(() => undefined);
+        await closeBrowserForClient(existing, accountId);
       }
+      clearChromiumSingletonLock(accountId);
+      resetRuntimeState(accountId, true);
+      if (
+        isChromiumProfileLockError(message) ||
+        /timed out/i.test(message)
+      ) {
+        getRuntimeState(accountId).lastAttemptAt = null;
+      }
+    })
+    .finally(() => {
+      getRuntimeState(accountId).startPromise = null;
     });
+}
+
+export function ensureAllAccountsStarted(): void {
+  for (const accountId of getAccountIds()) {
+    ensureClientStarted(accountId);
+  }
 }
 
 /**
  * Returns the client once it is authenticated and ready.
  * Throws if the session is not ready yet — callers should check status first.
  */
-export async function getWhatsAppClient(): Promise<Client> {
-  ensureClientStarted();
-  const state = getRuntimeState();
+export async function getWhatsAppClient(
+  accountId = DEFAULT_ACCOUNT_ID,
+): Promise<Client> {
+  ensureClientStarted(accountId);
+  const state = getRuntimeState(accountId);
 
   if (state.client && state.isReady) {
     return state.client;
   }
 
-  throw new Error("WhatsApp client not ready yet. Please scan QR code.");
+  throw new Error(
+    `WhatsApp account ${accountId} not ready yet. Please scan QR code.`,
+  );
 }
 
-export function getQRCode(): string | null {
-  return getRuntimeState().qrCode;
+export function getQRCode(accountId = DEFAULT_ACCOUNT_ID): string | null {
+  return getRuntimeState(accountId).qrCode;
 }
 
-export function isClientReady(): boolean {
-  const state = getRuntimeState();
+export function isClientReady(accountId = DEFAULT_ACCOUNT_ID): boolean {
+  const state = getRuntimeState(accountId);
   const awaitingQr =
     state.requiresQrScan || Boolean(state.qrCode || state.qrCodeDataUrl);
   return state.isReady && !awaitingQr;
 }
 
+export function isAnyAccountReady(): boolean {
+  return getAccountIds().some((accountId) => isClientReady(accountId));
+}
+
+export function getReadyAccountIds(): string[] {
+  return getAccountIds().filter((accountId) => isClientReady(accountId));
+}
+
 export async function resetClient(options?: {
   clearSession?: boolean;
+  accountId?: string;
 }): Promise<void> {
   const clearSession = options?.clearSession ?? false;
-  const state = getRuntimeState();
+  const accountId = options?.accountId ?? DEFAULT_ACCOUNT_ID;
+  const state = getRuntimeState(accountId);
   const existing = state.client;
+  const pendingStart = state.startPromise;
+  const wasReady = state.isReady;
 
-  resetRuntimeState(false);
-  getRuntimeState().requiresQrScan = clearSession;
+  recoveringAccounts.delete(accountId);
+  setAccountShuttingDown(accountId, true);
+  clearReadyFallbackTimer(accountId);
 
-  if (existing) {
-    if (clearSession) {
-      try {
-        await existing.logout();
-      } catch (error: unknown) {
-        console.warn(
-          "WhatsApp logout failed, destroying client instead:",
-          getErrorMessage(error),
-        );
+  try {
+    if (pendingStart) {
+      await Promise.race([pendingStart, sleep(10_000)]);
+    }
+    state.startPromise = null;
+
+    if (existing) {
+      // logout() can hang on a stuck QR session — only call when actually connected.
+      if (clearSession && wasReady) {
         try {
-          await existing.destroy();
-        } catch (destroyError: unknown) {
-          console.error("Error destroying WhatsApp client:", destroyError);
+          await Promise.race([
+            existing.logout(),
+            sleep(8_000).then(() => {
+              console.warn(
+                `WhatsApp logout timed out for account ${accountId}, closing browser`,
+              );
+            }),
+          ]);
+        } catch (error: unknown) {
+          console.warn(
+            "WhatsApp logout failed, closing browser directly:",
+            getErrorMessage(error),
+          );
         }
       }
-    } else {
-      existing.removeAllListeners();
-      try {
-        await existing.destroy();
-      } catch (error: unknown) {
-        console.error("Error destroying WhatsApp client:", error);
-      }
-    }
-  }
 
-  if (clearSession) {
-    const sessionDir = resolveSessionDir();
-    if (fs.existsSync(sessionDir)) {
-      fs.rmSync(sessionDir, { recursive: true, force: true });
+      await Promise.race([
+        closeBrowserForClient(existing, accountId),
+        sleep(12_000),
+      ]);
+    } else {
+      clearChromiumSingletonLock(accountId);
+      await sleep(process.platform === "win32" ? 400 : 150);
     }
-    ensureSessionDirectory();
-    getRuntimeState().requiresQrScan = true;
+
+    if (clearSession) {
+      await removeSessionDirectoryWithRetry(resolveSessionDir(accountId), accountId);
+      ensureSessionDirectory(accountId);
+    }
+  } finally {
+    resetRuntimeState(accountId, false);
+    const next = getRuntimeState(accountId);
+    next.requiresQrScan = clearSession;
+    next.lastError = null;
+    next.lastAttemptAt = null;
+    setAccountShuttingDown(accountId, false);
   }
 }
 
-export async function getStatus() {
-  const state = getRuntimeState();
+export async function getStatus(accountId = DEFAULT_ACCOUNT_ID) {
+  if (
+    isAccountStartupStuck(accountId) &&
+    !recoveringAccounts.has(accountId)
+  ) {
+    recoveringAccounts.add(accountId);
+    void forceRestartStuckAccount(accountId).finally(() => {
+      recoveringAccounts.delete(accountId);
+    });
+  }
+
+  const state = getRuntimeState(accountId);
 
   if (state.client && !state.isReady && !state.requiresQrScan) {
-    try {
-      const waState = await state.client.getState();
-      if (waState === "CONNECTED") {
-        markReady(state.client, "connected-state");
-      }
-    } catch {
-      // Only trust a restored session when auth files still exist on disk.
-      if (
-        state.client.pupPage &&
-        !state.qrCode &&
-        hasPersistedSession()
-      ) {
-        markReady(state.client, "session-page");
-      }
+    const waState = await safeGetClientState(state.client);
+    if (waState === "CONNECTED") {
+      markReady(state.client, "connected-state", accountId);
+    } else if (
+      state.client.pupPage &&
+      !state.qrCode &&
+      hasPersistedSession(accountId)
+    ) {
+      markReady(state.client, "session-page", accountId);
     }
   }
 
-  const current = getRuntimeState();
+  const current = getRuntimeState(accountId);
   const awaitingQr =
     current.requiresQrScan || Boolean(current.qrCode || current.qrCodeDataUrl);
 
+  let connectedPhone = current.connectedPhone;
+  if (
+    current.isReady &&
+    !connectedPhone &&
+    current.client
+  ) {
+    connectedPhone = readConnectedPhone(current.client);
+    if (connectedPhone) {
+      current.connectedPhone = connectedPhone;
+    }
+  }
+
+  let startupPhase: "idle" | "starting" | "waiting-qr" | "ready" | "error" =
+    "idle";
+  if (current.isReady && !awaitingQr) {
+    startupPhase = "ready";
+  } else if (current.qrCode || current.qrCodeDataUrl) {
+    startupPhase = "waiting-qr";
+  } else if (current.client || current.startPromise) {
+    startupPhase = "starting";
+  } else if (current.lastError) {
+    startupPhase = "error";
+  }
+
   return {
+    accountId,
     ready: current.isReady && !awaitingQr,
     authenticated: current.authenticated,
+    connectedPhone,
     loadingPercent: current.loadingPercent,
     qrCode: current.qrCode,
     qrCodeDataUrl: current.qrCodeDataUrl,
     initialized: current.client !== null || current.startPromise !== null,
     lastError: current.lastError,
     requiresQrScan: current.requiresQrScan,
+    startupPhase,
+  };
+}
+
+export async function getAllAccountsStatus() {
+  const accounts = [];
+  for (const accountId of getAccountIds()) {
+    accounts.push(await getStatus(accountId));
+  }
+  const readyCount = accounts.filter((account) => account.ready).length;
+  return {
+    accounts,
+    readyCount,
+    anyReady: readyCount > 0,
   };
 }
 
@@ -534,8 +972,9 @@ function mergeText(
 async function lookupContactMetadata(
   phoneDigits: string,
   resolvedId: string | null,
+  accountId = DEFAULT_ACCOUNT_ID,
 ): Promise<PageContactMetadata | null> {
-  const client = await getWhatsAppClient();
+  const client = await getWhatsAppClient(accountId);
   const page = client.pupPage;
   if (!page) {
     return null;
@@ -562,6 +1001,29 @@ async function lookupContactMetadata(
         }
         const trimmed = value.trim();
         return trimmed ? trimmed : null;
+      };
+
+      const normalizeWebsiteList = (value: unknown): string[] => {
+        if (!Array.isArray(value)) {
+          return [];
+        }
+        return value
+          .map((item) => {
+            if (typeof item === "string") {
+              return item.trim();
+            }
+            if (item && typeof item === "object") {
+              const record = item as Record<string, unknown>;
+              if (typeof record.url === "string") {
+                return record.url.trim();
+              }
+              if (typeof record.link === "string") {
+                return record.link.trim();
+              }
+            }
+            return "";
+          })
+          .filter((item) => item.length > 0);
       };
 
       const ids = Array.from(
@@ -631,7 +1093,7 @@ async function lookupContactMetadata(
           email: text(source.email) || current?.email || null,
           website:
             source.website && source.website.length > 0
-              ? source.website
+              ? normalizeWebsiteList(source.website)
               : current?.website || [],
           address: text(source.address) || current?.address || null,
         };
@@ -849,7 +1311,7 @@ async function lookupContactMetadata(
                       .map((item) => item.localized_display_name)
                       .filter((value): value is string => Boolean(value)),
                     email: text(business.email),
-                    website: business.website || [],
+                    website: normalizeWebsiteList(business.website),
                     address: text(business.address),
                   }
                 : null,
@@ -934,7 +1396,7 @@ async function lookupContactMetadata(
                       .map((item) => item.localized_display_name)
                       .filter((value): value is string => Boolean(value)),
                     email: text(business.email),
-                    website: business.website || [],
+                    website: normalizeWebsiteList(business.website),
                     address: text(business.address),
                   }
                 : null,
@@ -1016,8 +1478,9 @@ function applyContactMetadata(
  */
 export async function lookupProfilePicture(
   phoneDigits: string,
+  accountId = DEFAULT_ACCOUNT_ID,
 ): Promise<ProfilePicLookup> {
-  const client = await getWhatsAppClient();
+  const client = await getWhatsAppClient(accountId);
   const page = client.pupPage;
   if (!page) {
     return {
@@ -1199,15 +1662,16 @@ export async function lookupProfilePicture(
  */
 export async function lookupProfileDetails(
   phoneDigits: string,
+  accountId = DEFAULT_ACCOUNT_ID,
 ): Promise<ProfileDetails> {
-  const picResult = await lookupProfilePicture(phoneDigits);
+  const picResult = await lookupProfilePicture(phoneDigits, accountId);
   const resolvedId = picResult.resolvedId || `${phoneDigits}@c.us`;
 
   const details: ProfileDetails = { ...picResult };
 
   let metadata: PageContactMetadata | null = null;
   try {
-    metadata = await lookupContactMetadata(phoneDigits, resolvedId);
+    metadata = await lookupContactMetadata(phoneDigits, resolvedId, accountId);
     applyContactMetadata(details, metadata);
   } catch (error: unknown) {
     console.warn(
@@ -1218,7 +1682,7 @@ export async function lookupProfileDetails(
 
   if (!details.displayName && !details.pushname) {
     try {
-      const page = (await getWhatsAppClient()).pupPage;
+      const page = (await getWhatsAppClient(accountId)).pupPage;
       if (page) {
         const { probePushnameViaProfileView } = await import(
           "@/lib/profile-probe"
@@ -1268,12 +1732,17 @@ export type ProfileDiagnostic = {
  */
 export async function diagnoseProfileLookup(
   phoneDigits: string,
+  accountId = DEFAULT_ACCOUNT_ID,
 ): Promise<ProfileDiagnostic> {
-  const profilePic = await lookupProfilePicture(phoneDigits);
+  const profilePic = await lookupProfilePicture(phoneDigits, accountId);
   const resolvedId = profilePic.resolvedId || `${phoneDigits}@c.us`;
-  const mergedMetadata = await lookupContactMetadata(phoneDigits, resolvedId);
+  const mergedMetadata = await lookupContactMetadata(
+    phoneDigits,
+    resolvedId,
+    accountId,
+  );
 
-  const client = await getWhatsAppClient();
+  const client = await getWhatsAppClient(accountId);
   const page = client.pupPage;
   if (!page) {
     return {

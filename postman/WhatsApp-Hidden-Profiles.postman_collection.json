@@ -1,0 +1,650 @@
+{
+  "info": {
+    "_postman_id": "a8c4e2f1-7b3d-4c9a-9e51-wa-hidden-profiles",
+    "name": "WhatsApp Hidden Profiles API",
+    "description": "Keyed API for an OSINT app (`/api/v1`).\n\n**Auth:** `X-API-Key: {{apiKey}}` (or `Authorization: Bearer {{apiKey}}`). Create a key in the dashboard at `/settings`.\n\n**OSINT connection (WhatsApp next to RapidAPI keys)**\n1. Save `baseUrl` + `apiKey` in OSINT settings.\n2. `GET /status` — HTTP 200 = API connected. `whatsappAdded: false` = no WhatsApp linked yet. Render `accounts[].qrCodeDataUrl` as a barcode and poll until `ready: true`.\n3. `POST /accounts` — add another WhatsApp (same as the dashboard + Add account). Poll `GET /accounts/:id` until QR appears, then scan.\n4. `POST /accounts/:id/disconnect` — logout and get a new QR. `DELETE /accounts/:id` — remove a slot (not the last one).\n\n**OSINT lookup flow**\n1. `GET /profiles/:digits` — already stored? Use it. No WhatsApp call.\n2. If 404 → `POST /lookup` — live fetch (returns SQLite cache when already fetched).\n3. Download the photo from `profile.profilePicUrl`.\n4. Bulk: `POST /queue` (chunks of ≤20,000) or `POST /lookups` (≤5,000, then poll).\n\nSuccessful lookups persist into SQLite. Later `GET /profiles` / `GET /profiles/:digits` return the same fields plus an absolute photo URL.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "value",
+        "value": "{{apiKey}}",
+        "type": "string"
+      },
+      {
+        "key": "key",
+        "value": "X-API-Key",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://192.189.2.159:3002"
+    },
+    {
+      "key": "apiKey",
+      "value": "whp_YOUR_KEY"
+    },
+    {
+      "key": "phone",
+      "value": "03171717883"
+    },
+    {
+      "key": "digits",
+      "value": "923171717883"
+    },
+    {
+      "key": "jobId",
+      "value": ""
+    },
+    {
+      "key": "profilePicUrl",
+      "value": ""
+    },
+    {
+      "key": "searchQuery",
+      "value": "0317"
+    },
+    {
+      "key": "accountId",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health (no API key)",
+      "item": [
+        {
+          "name": "App health",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/health",
+            "description": "Process is up. No API key."
+          }
+        },
+        {
+          "name": "Database health",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/health/db",
+            "description": "SQLite `data/app.db` is readable."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. Connection",
+      "description": "OSINT settings: save the API key, then call status. HTTP 200 = key/host OK. `whatsappAdded: false` means show the QR barcode from `accounts[].qrCodeDataUrl` and poll until a session is linked.",
+      "item": [
+        {
+          "name": "WhatsApp status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/status",
+            "description": "API connection check. Returns `ready`, `whatsappAdded`, `accounts[]` (each with `qrCodeDataUrl` when a scan is needed), and the queue worker. Lookups need `ready: true` unless the number is already in SQLite."
+          },
+          "response": [
+            {
+              "name": "Ready",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/api/v1/status"
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"ready\": true,\n  \"whatsappAdded\": true,\n  \"readyCount\": 1,\n  \"accountCount\": 1,\n  \"maxAccounts\": 20,\n  \"accounts\": [\n    {\n      \"accountId\": \"1\",\n      \"ready\": true,\n      \"authenticated\": true,\n      \"connectedPhone\": \"923001234567\",\n      \"loadingPercent\": null,\n      \"qrCode\": null,\n      \"qrCodeDataUrl\": null,\n      \"initialized\": true,\n      \"lastError\": null,\n      \"requiresQrScan\": false,\n      \"startupPhase\": \"ready\",\n      \"status\": \"connected\",\n      \"message\": \"WhatsApp account 1 is connected (+923001234567)\"\n    }\n  ],\n  \"worker\": {\n    \"running\": true,\n    \"phase\": \"idle\",\n    \"message\": \"Queue empty — waiting for new numbers\",\n    \"batchSize\": 50,\n    \"restMs\": 1200000\n  },\n  \"message\": \"1 WhatsApp account(s) ready\"\n}"
+            },
+            {
+              "name": "No WhatsApp added (scan QR)",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/api/v1/status"
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"ready\": false,\n  \"whatsappAdded\": false,\n  \"readyCount\": 0,\n  \"accountCount\": 1,\n  \"maxAccounts\": 20,\n  \"accounts\": [\n    {\n      \"accountId\": \"1\",\n      \"ready\": false,\n      \"authenticated\": false,\n      \"connectedPhone\": null,\n      \"loadingPercent\": null,\n      \"qrCode\": \"2@....\",\n      \"qrCodeDataUrl\": \"data:image/png;base64,...\",\n      \"initialized\": true,\n      \"lastError\": null,\n      \"requiresQrScan\": true,\n      \"startupPhase\": \"waiting-qr\",\n      \"status\": \"scan_qr\",\n      \"message\": \"No WhatsApp is added for account 1. Scan the QR code.\"\n    }\n  ],\n  \"worker\": {\n    \"running\": true,\n    \"phase\": \"waiting_whatsapp\"\n  },\n  \"message\": \"No WhatsApp is added. Scan the QR code to connect.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "List WhatsApp accounts",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code !== 200) { return; }",
+                  "const json = pm.response.json();",
+                  "const first = Array.isArray(json.accounts) ? json.accounts[0] : null;",
+                  "if (first && first.accountId) {",
+                  "  pm.collectionVariables.set('accountId', first.accountId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/accounts",
+            "description": "Same account objects as status, without the queue worker. OSINT settings can list these as connection cards. Saves `accountId` from the first slot."
+          }
+        },
+        {
+          "name": "Add WhatsApp account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code !== 201 && pm.response.code !== 200) { return; }",
+                  "const json = pm.response.json();",
+                  "if (json.accountId) {",
+                  "  pm.collectionVariables.set('accountId', json.accountId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/accounts",
+            "description": "Creates another WhatsApp slot (dashboard + Add account). HTTP 201. Poll `GET /accounts/:id` until `qrCodeDataUrl` is set, then scan. Saves `accountId`."
+          },
+          "response": [
+            {
+              "name": "Created — scan QR",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": "{{baseUrl}}/api/v1/accounts"
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"accountId\": \"2\",\n  \"qrCodeDataUrl\": \"data:image/png;base64,...\",\n  \"requiresQrScan\": true,\n  \"ready\": true,\n  \"whatsappAdded\": true,\n  \"readyCount\": 1,\n  \"accountCount\": 2,\n  \"maxAccounts\": 20,\n  \"message\": \"Account 2 added. Scan the QR code to connect.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get one account (poll QR)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/accounts/{{accountId}}",
+            "description": "Poll this after add/disconnect. When `status` is `scan_qr`, render `qrCodeDataUrl`. When `ready` is true, the session is linked."
+          }
+        },
+        {
+          "name": "Disconnect account (new QR)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/accounts/{{accountId}}/disconnect",
+            "description": "Logs that session out and starts a new QR. The slot stays. Same as dashboard LOGOUT / RESET."
+          }
+        },
+        {
+          "name": "Delete account",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/accounts/{{accountId}}",
+            "description": "Removes the slot and logs it out. The last remaining account cannot be deleted (HTTP 400)."
+          }
+        },
+        {
+          "name": "OpenAPI spec",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/openapi.json"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Stored profiles (OSINT read)",
+      "description": "Read from SQLite only — no WhatsApp call. Use this first from the OSINT app.",
+      "item": [
+        {
+          "name": "List / search stored profiles",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code !== 200) { return; }",
+                  "const json = pm.response.json();",
+                  "const first = Array.isArray(json.profiles) ? json.profiles[0] : null;",
+                  "if (!first) { return; }",
+                  "if (first.digits) {",
+                  "  pm.collectionVariables.set('digits', first.digits);",
+                  "}",
+                  "const pic = first.profile && first.profile.profilePicUrl;",
+                  "if (pic) {",
+                  "  pm.collectionVariables.set('profilePicUrl', pic);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/profiles?q={{searchQuery}}&page=1",
+            "description": "Paginated stored profiles (20/page). Query `q` matches digits, input phone, or display name. Omit `q` to list all. Each item includes full `profile` (name, about, business, `profilePicUrl`)."
+          },
+          "response": [
+            {
+              "name": "Page 1",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/api/v1/profiles?q=0317&page=1"
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"total\": 1,\n  \"page\": 1,\n  \"limit\": 20,\n  \"totalPages\": 1,\n  \"profiles\": [\n    {\n      \"digits\": \"923171717883\",\n      \"inputPhone\": \"03171717883\",\n      \"displayName\": \"Example\",\n      \"accountType\": \"personal\",\n      \"success\": true,\n      \"firstFetchedAt\": 1710000000000,\n      \"lastFetchedAt\": 1710000000000,\n      \"profile\": {\n        \"phone\": \"03171717883\",\n        \"success\": true,\n        \"hasProfilePic\": true,\n        \"profilePicUrl\": \"http://192.189.2.159:3002/api/media/profiles/923171717883/923171717883.jpg\",\n        \"resolvedPhone\": \"923171717883\",\n        \"existsOnWhatsApp\": true,\n        \"displayName\": \"Example\",\n        \"about\": \"Hey there! I am using WhatsApp.\",\n        \"isBusiness\": false,\n        \"accountType\": \"personal\"\n      }\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "List all stored profiles (no search)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/profiles?page=1",
+            "description": "Newest first. Increment `page` until `page >= totalPages`."
+          }
+        },
+        {
+          "name": "Get one stored profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code !== 200) { return; }",
+                  "const json = pm.response.json();",
+                  "if (json.digits) {",
+                  "  pm.collectionVariables.set('digits', json.digits);",
+                  "}",
+                  "const pic = json.profile && json.profile.profilePicUrl;",
+                  "if (pic) {",
+                  "  pm.collectionVariables.set('profilePicUrl', pic);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/profiles/{{digits}}",
+            "description": "International digits only (e.g. `923171717883`). 404 if never fetched. OSINT should call this before a live lookup."
+          },
+          "response": [
+            {
+              "name": "Found",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/api/v1/profiles/923171717883"
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"digits\": \"923171717883\",\n  \"inputPhone\": \"03171717883\",\n  \"firstFetchedAt\": 1710000000000,\n  \"lastFetchedAt\": 1710000000000,\n  \"profile\": {\n    \"phone\": \"03171717883\",\n    \"success\": true,\n    \"fromCache\": true,\n    \"reusedFromDb\": true,\n    \"hasProfilePic\": true,\n    \"profilePicUrl\": \"http://192.189.2.159:3002/api/media/profiles/923171717883/923171717883.jpg\",\n    \"resolvedPhone\": \"923171717883\",\n    \"whatsappId\": \"923171717883@c.us\",\n    \"existsOnWhatsApp\": true,\n    \"name\": null,\n    \"pushname\": \"Example\",\n    \"shortName\": null,\n    \"verifiedName\": null,\n    \"displayName\": \"Example\",\n    \"about\": \"Hey there! I am using WhatsApp.\",\n    \"isBusiness\": false,\n    \"isEnterprise\": false,\n    \"isWAContact\": true,\n    \"isMyContact\": false,\n    \"accountType\": \"personal\",\n    \"businessDescription\": null,\n    \"businessCategories\": [],\n    \"businessEmail\": null,\n    \"businessWebsite\": [],\n    \"businessAddress\": null,\n    \"businessTag\": null\n  }\n}"
+            },
+            {
+              "name": "Not stored yet",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": "{{baseUrl}}/api/v1/profiles/923171717883"
+              },
+              "status": "Not Found",
+              "code": 404,
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"error\": \"Profile not found\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Live lookup",
+      "description": "Fetches from WhatsApp if not already in SQLite (`reusedFromDb: true` means cache hit).",
+      "item": [
+        {
+          "name": "Lookup one number",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code !== 200) { return; }",
+                  "const json = pm.response.json();",
+                  "const profile = json.profile || {};",
+                  "if (profile.resolvedPhone) {",
+                  "  pm.collectionVariables.set('digits', profile.resolvedPhone);",
+                  "}",
+                  "if (profile.profilePicUrl) {",
+                  "  pm.collectionVariables.set('profilePicUrl', profile.profilePicUrl);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{phone}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/lookup",
+            "description": "Synchronous. Returns SQLite cache if this number was fetched before (no WhatsApp call). Saves `digits` and `profilePicUrl` for the photo request."
+          },
+          "response": [
+            {
+              "name": "Cached / live profile",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone\": \"03171717883\"\n}"
+                },
+                "url": "{{baseUrl}}/api/v1/lookup"
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"profile\": {\n    \"phone\": \"03171717883\",\n    \"success\": true,\n    \"fromCache\": false,\n    \"reusedFromDb\": true,\n    \"hasProfilePic\": true,\n    \"profilePicUrl\": \"http://192.189.2.159:3002/api/media/profiles/923171717883/923171717883.jpg\",\n    \"resolvedPhone\": \"923171717883\",\n    \"whatsappId\": \"923171717883@c.us\",\n    \"existsOnWhatsApp\": true,\n    \"displayName\": \"Example\",\n    \"about\": \"Hey there! I am using WhatsApp.\",\n    \"isBusiness\": false,\n    \"accountType\": \"personal\",\n    \"businessDescription\": null,\n    \"businessCategories\": [],\n    \"businessEmail\": null,\n    \"businessWebsite\": [],\n    \"businessAddress\": null\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Lookup one number (force refresh)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{phone}}\",\n  \"refresh\": true\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/lookup",
+            "description": "Skip cache and call WhatsApp again. Needs a connected account."
+          }
+        },
+        {
+          "name": "Lookup with Bearer token",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{apiKey}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"{{phone}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/lookup",
+            "description": "Same as lookup, using `Authorization: Bearer whp_...` instead of `X-API-Key`."
+          }
+        },
+        {
+          "name": "CORS preflight (OPTIONS)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "OPTIONS",
+            "header": [
+              {
+                "key": "Origin",
+                "value": "https://your-osint-app.example"
+              },
+              {
+                "key": "Access-Control-Request-Method",
+                "value": "POST"
+              },
+              {
+                "key": "Access-Control-Request-Headers",
+                "value": "Content-Type, X-API-Key"
+              }
+            ],
+            "url": "{{baseUrl}}/api/v1/lookup",
+            "description": "Browser OSINT apps hit this first. Allowed origins: `OCEAN_CORS_ORIGINS` (default `*`)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Profile photo",
+      "item": [
+        {
+          "name": "Download photo (from last lookup)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{profilePicUrl}}",
+            "description": "Uses `profilePicUrl` saved by Lookup / Get stored profile. Photo URLs are public (`/api/media/...`). Run a profile request first."
+          }
+        },
+        {
+          "name": "Download photo by digits",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/media/profiles/{{digits}}/{{digits}}.jpg",
+            "description": "Fallback when you already know international digits. 404 if that number has no saved image."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Background queue (bulk / million)",
+      "description": "Always-on worker: 50 live fetches per WhatsApp, then 20 min rest. Already stored numbers are skipped.",
+      "item": [
+        {
+          "name": "Enqueue numbers",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phones\": [\n    \"{{phone}}\",\n    \"03331234567\"\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/queue",
+            "description": "Stores numbers in SQLite. Max 20,000 per request — loop for a million. Duplicates are skipped. After the worker finishes, fetch with `GET /profiles/:digits`."
+          },
+          "response": [
+            {
+              "name": "Accepted",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phones\": [\"03171717883\", \"03331234567\"]\n}"
+                },
+                "url": "{{baseUrl}}/api/v1/queue"
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                { "key": "Content-Type", "value": "application/json" }
+              ],
+              "_postman_previewlanguage": "json",
+              "body": "{\n  \"success\": true,\n  \"accepted\": 2,\n  \"skippedInvalid\": 0,\n  \"skippedDuplicate\": 0,\n  \"totalReceived\": 2,\n  \"message\": \"Numbers stored in SQLite. The background worker fetches 50 per linked WhatsApp, then rests 20 minutes.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Queue status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/queue",
+            "description": "`pending` / `processing` / `done` / `failed` / `profiles` plus worker `phase` (`fetching`, `resting`, `waiting_whatsapp`)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Async jobs (wait for results now)",
+      "description": "Up to 5,000 numbers. Poll until `status` is `completed` or `failed`. Prefer `/queue` for huge lists.",
+      "item": [
+        {
+          "name": "Start batch job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const json = pm.response.json();",
+                  "  if (json.jobId) {",
+                  "    pm.collectionVariables.set('jobId', json.jobId);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phones\": [\n    \"{{phone}}\",\n    \"03331234567\"\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/lookups",
+            "description": "HTTP 202. Saves `jobId` for the poll request."
+          }
+        },
+        {
+          "name": "Poll batch job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code !== 200) { return; }",
+                  "const json = pm.response.json();",
+                  "const first = Array.isArray(json.results) ? json.results[0] : null;",
+                  "if (first && first.resolvedPhone) {",
+                  "  pm.collectionVariables.set('digits', first.resolvedPhone);",
+                  "}",
+                  "if (first && first.profilePicUrl) {",
+                  "  pm.collectionVariables.set('profilePicUrl', first.profilePicUrl);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/v1/lookups/{{jobId}}",
+            "description": "Repeat until `status` is `completed` or `failed`. `results[]` are full profiles with absolute `profilePicUrl`."
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+# VPS production compose — single service (no Mongo/Postgres needed).
+# Usage: docker compose -f docker-compose.vps.yml up -d --build
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wa-hidden-profiles
+    hostname: wa-wwebjs
+    init: true
+    restart: unless-stopped
+    ports:
+      # Host 3002 → container 3000 (change APP_HOST_PORT in .env if needed)
+      - "${APP_HOST_PORT:-3002}:3000"
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+      HOME: /home/nextjs
+      WWJS_SESSION_DIR: /app/.wwebjs_auth
+      APP_DATA_DIR: /app/data
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
+      DBUS_SESSION_BUS_ADDRESS: /dev/null
+    volumes:
+      - wa_session:/app/.wwebjs_auth
+      - wa_data:/app/data
+    shm_size: "1gb"
+    tmpfs:
+      - /tmp:mode=1777,size=512m
+    security_opt:
+      - seccomp:unconfined
+
+volumes:
+  wa_session:
+  wa_data:
