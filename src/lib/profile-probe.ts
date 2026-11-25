@@ -67,11 +67,6 @@ function collectNameHints(text: string): string[] {
 
 function pickBestNameHint(hints: string[]): string | null {
   for (const hint of hints) {
-    if (/sameer/i.test(hint) || /khan/i.test(hint)) {
-      return hint;
-    }
-  }
-  for (const hint of hints) {
     const sanitized = sanitizePersonName(hint);
     if (sanitized) {
       return sanitized;
@@ -232,10 +227,24 @@ async function triggerProfileProbe(
           getPushname: (contact: unknown) => string;
           getVerifiedName: (contact: unknown) => string;
           getName: (contact: unknown) => string;
+          getNotifyName?: (contact: unknown) => string;
+        };
+        const frontend = win.require("WAWebFrontendContactGetters") as {
+          getFormattedName?: (contact: unknown) => string;
         };
         const contact = await collections.Contact.find(wid);
+        const raw = contact as Record<string, unknown>;
+        const formatted = frontend.getFormattedName?.(contact) || "";
+        const tildeName = formatted.trim().startsWith("~") ? formatted : null;
+        const pushname =
+          getters.getPushname(contact) ||
+          (typeof raw.pushname === "string" ? raw.pushname : "") ||
+          (typeof raw.notifyName === "string" ? raw.notifyName : "") ||
+          getters.getNotifyName?.(contact) ||
+          tildeName ||
+          null;
         return {
-          pushname: getters.getPushname(contact) || null,
+          pushname,
           verifiedName: getters.getVerifiedName(contact) || null,
           name: getters.getName(contact) || null,
         };
@@ -812,12 +821,25 @@ export async function probePushnameViaProfileView(
           getPushname: (contact: unknown) => string;
           getVerifiedName: (contact: unknown) => string;
           getName: (contact: unknown) => string;
+          getNotifyName?: (contact: unknown) => string;
+        };
+        const frontend = win.require("WAWebFrontendContactGetters") as {
+          getFormattedName?: (contact: unknown) => string;
         };
         const contact = await collections.Contact.find(
           widFactory.createWid(resolved),
         );
+        const raw = contact as Record<string, unknown>;
+        const formatted = frontend.getFormattedName?.(contact) || "";
+        const tildeName = formatted.trim().startsWith("~") ? formatted : null;
         return {
-          pushname: getters.getPushname(contact) || null,
+          pushname:
+            getters.getPushname(contact) ||
+            (typeof raw.pushname === "string" ? raw.pushname : null) ||
+            (typeof raw.notifyName === "string" ? raw.notifyName : null) ||
+            getters.getNotifyName?.(contact) ||
+            tildeName ||
+            null,
           verifiedName: getters.getVerifiedName(contact) || null,
           name: getters.getName(contact) || null,
         };
@@ -839,6 +861,7 @@ export async function probePushnameViaProfileView(
 
     const pushname =
       normalizeProbeName(trigger.contactAfterProbe.pushname) ||
+      normalizeProbeName(ui.domName) ||
       normalizeProbeName(hintedName);
     const verifiedName =
       normalizeProbeName(trigger.contactAfterProbe.verifiedName) || null;

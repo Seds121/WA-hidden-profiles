@@ -42,11 +42,15 @@ type InternalAccountStatus = Awaited<ReturnType<typeof getStatus>>;
 export function connectionStateFromAccount(
   account: InternalAccountStatus,
 ): WhatsAppConnectionState {
-  if (account.ready) {
+  const hasQr = Boolean(account.qrCodeDataUrl || account.qrCode);
+  if (account.ready && !account.requiresQrScan && !hasQr) {
     return "connected";
   }
-  if (account.qrCodeDataUrl || account.qrCode) {
+  if (hasQr) {
     return "scan_qr";
+  }
+  if (account.requiresQrScan) {
+    return "connecting";
   }
   if (
     account.initialized ||
@@ -61,7 +65,8 @@ export function connectionStateFromAccount(
 export function statusMessageFromAccount(
   account: InternalAccountStatus,
 ): string {
-  if (account.ready) {
+  const hasQr = Boolean(account.qrCode || account.qrCodeDataUrl);
+  if (account.ready && !account.requiresQrScan && !hasQr) {
     const phone = account.connectedPhone
       ? ` (+${account.connectedPhone.replace(/^\+/, "")})`
       : "";

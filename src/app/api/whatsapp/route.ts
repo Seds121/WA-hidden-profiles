@@ -149,7 +149,14 @@ export async function GET(request: NextRequest) {
 
     const result = await lookupProfile(phone, forceRefresh, accountId);
     const runId = searchParams.get("runId");
-    await persistRunResults(runId, [result]);
+    try {
+      await persistRunResults(runId, [result]);
+    } catch (persistError: unknown) {
+      console.warn(
+        "Profile lookup succeeded but saving it failed:",
+        getErrorMessage(persistError),
+      );
+    }
     return NextResponse.json({ ...result, runId: runId ?? undefined });
   } catch (error: unknown) {
     const message = getErrorMessage(error);

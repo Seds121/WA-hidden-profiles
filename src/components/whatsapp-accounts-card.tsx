@@ -74,11 +74,15 @@ function formatConnectedPhone(digits: string): string {
 }
 
 function getConnectionState(account: AccountStatus): ConnectionState {
-  if (account.ready) {
+  const hasQr = Boolean(account.qrCodeDataUrl || account.qrCode);
+  if (account.ready && !account.requiresQrScan && !hasQr) {
     return 'connected';
   }
-  if (account.qrCodeDataUrl || account.qrCode) {
+  if (hasQr) {
     return 'scan-qr';
+  }
+  if (account.requiresQrScan) {
+    return 'connecting';
   }
   if (
     account.initialized ||
@@ -110,7 +114,12 @@ function getStatusConfig(account: AccountStatus): StatusConfig {
 }
 
 function accountDetailMessage(account: AccountStatus): string {
-  if (account.ready) {
+  if (
+    account.ready &&
+    !account.requiresQrScan &&
+    !account.qrCodeDataUrl &&
+    !account.qrCode
+  ) {
     return 'This account is connected and ready for lookups.';
   }
   if (account.qrCodeDataUrl) {

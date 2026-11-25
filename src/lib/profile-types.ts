@@ -31,4 +31,6 @@ export type ProfileLookupResult = {
   businessAddress?: string | null;
   businessTag?: string | null;
   accountId?: string;
+  /** Set after a lookup that knows how to read personal pushnames. */
+  nameLookupVersion?: number;
 };

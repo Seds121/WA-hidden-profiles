@@ -2,7 +2,10 @@
  * In-memory profile cache.
  * Stored on globalThis so Next.js HMR does not wipe results between reloads.
  */
-export const PROFILE_CACHE_VERSION = 5;
+export const PROFILE_CACHE_VERSION = 6;
+
+/** Bump when personal pushname lookup learns a new source, so old nameless rows are fetched again once. */
+export const PERSONAL_NAME_LOOKUP_VERSION = 2;
 
 export type CachedProfile = {
   cacheVersion?: number;

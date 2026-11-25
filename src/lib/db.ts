@@ -89,9 +89,23 @@ function resolveWasmPath(): string {
   return candidates[1];
 }
 
+function isSqliteBuffer(buffer: Buffer): boolean {
+  return buffer.subarray(0, 15).toString("utf8") === "SQLite format 3";
+}
+
 function persistDatabase(db: SqlJsDatabase): void {
-  const data = db.export();
-  fs.writeFileSync(DB_PATH, Buffer.from(data));
+  const buffer = Buffer.from(db.export());
+  if (!isSqliteBuffer(buffer)) {
+    return;
+  }
+  const tmpPath = `${DB_PATH}.tmp`;
+  fs.writeFileSync(tmpPath, buffer);
+  try {
+    fs.renameSync(tmpPath, DB_PATH);
+  } catch {
+    fs.copyFileSync(tmpPath, DB_PATH);
+    fs.rmSync(tmpPath, { force: true });
+  }
 }
 
 function initSchema(db: AppDatabase): void {
@@ -233,6 +247,7 @@ export async function initDatabase(): Promise<void> {
   }
 
   globalForDb.__appSqliteInit = (async () => {
+    try {
     getDataDir();
     const wasmPath = resolveWasmPath();
     const SQL = await initSqlJs({
@@ -241,7 +256,14 @@ export async function initDatabase(): Promise<void> {
 
     let rawDb: SqlJsDatabase;
     if (fs.existsSync(DB_PATH)) {
-      rawDb = new SQL.Database(fs.readFileSync(DB_PATH));
+      const existing = fs.readFileSync(DB_PATH);
+      if (isSqliteBuffer(existing)) {
+        rawDb = new SQL.Database(existing);
+      } else {
+        const brokenPath = `${DB_PATH}.invalid-${Date.now()}`;
+        fs.renameSync(DB_PATH, brokenPath);
+        rawDb = new SQL.Database();
+      }
     } else {
       rawDb = new SQL.Database();
     }
@@ -254,6 +276,10 @@ export async function initDatabase(): Promise<void> {
     appDb = wrapped;
     globalForDb.__appSqlite = wrapped;
     globalForDb.__appSqliteRaw = rawDb;
+    } catch (error) {
+      globalForDb.__appSqliteInit = undefined;
+      throw error;
+    }
   })();
 
   await globalForDb.__appSqliteInit;

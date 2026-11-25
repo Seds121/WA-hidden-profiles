@@ -265,19 +265,6 @@ function clearReadyFallbackTimer(accountId = DEFAULT_ACCOUNT_ID): void {
   }
 }
 
-function hasPersistedSession(accountId = DEFAULT_ACCOUNT_ID): boolean {
-  try {
-    const base = resolveSessionDir(accountId);
-    const candidates = [
-      path.join(base, "session", "Default"),
-      path.join(base, `session-wa-account-${accountId}`, "Default"),
-    ];
-    return candidates.some((candidate) => fs.existsSync(candidate));
-  } catch {
-    return false;
-  }
-}
-
 function isAccountStartupStuck(accountId = DEFAULT_ACCOUNT_ID): boolean {
   const state = getRuntimeState(accountId);
   if (!state.lastAttemptAt) {
@@ -782,16 +769,21 @@ export async function getStatus(accountId = DEFAULT_ACCOUNT_ID) {
 
   const state = getRuntimeState(accountId);
 
-  if (state.client && !state.isReady && !state.requiresQrScan) {
+  if (state.client && !state.requiresQrScan) {
     const waState = await safeGetClientState(state.client);
-    if (waState === "CONNECTED") {
+    const phone = state.connectedPhone || readConnectedPhone(state.client);
+    const awaitingPair =
+      waState === "UNPAIRED" || waState === "UNPAIRED_IDLE";
+    // A brand-new slot opens Chrome before the QR exists. That creates a
+    // profile folder and a page, but there is no logged-in number yet.
+    // Only a CONNECTED socket plus a phone identity means the account was scanned.
+    if (!state.isReady && waState === "CONNECTED" && phone) {
       markReady(state.client, "connected-state", accountId);
-    } else if (
-      state.client.pupPage &&
-      !state.qrCode &&
-      hasPersistedSession(accountId)
-    ) {
-      markReady(state.client, "session-page", accountId);
+    } else if (awaitingPair || (state.isReady && !phone && waState !== "CONNECTED")) {
+      state.requiresQrScan = awaitingPair;
+      state.isReady = false;
+      state.authenticated = false;
+      state.connectedPhone = null;
     }
   }
 
@@ -908,8 +900,8 @@ function pickDisplayName(
 
   const candidates = [
     contact.verifiedName,
-    contact.pushname,
     contact.name,
+    contact.pushname,
     contact.shortName,
     tag,
   ];
@@ -1001,6 +993,70 @@ async function lookupContactMetadata(
         }
         const trimmed = value.trim();
         return trimmed ? trimmed : null;
+      };
+
+      // "~Alyan Khan" is WhatsApp's chat-list display of a personal pushname.
+      // The tilde is not stored on the contact. Phone numbers must not win
+      // over a later real name.
+      const personName = (value: unknown): string | null => {
+        const raw = text(value);
+        if (!raw) {
+          return null;
+        }
+        const stripped = raw.replace(/^\s*~+\s*/, "").trim();
+        if (!stripped || stripped.length < 2 || stripped.length > 80) {
+          return null;
+        }
+        if (/^\+?[\d\s().-]{8,}$/.test(stripped)) {
+          return null;
+        }
+        if (/@(c\.us|lid|s\.whatsapp\.net)$/i.test(stripped)) {
+          return null;
+        }
+        if (/^\d{6,}$/.test(stripped)) {
+          return null;
+        }
+        if (!/[a-zA-Z\u00C0-\uFFFF]/.test(stripped)) {
+          return null;
+        }
+        return stripped;
+      };
+
+      const firstPersonName = (
+        ...values: Array<unknown>
+      ): string | null => {
+        for (const value of values) {
+          const name = personName(value);
+          if (name) {
+            return name;
+          }
+        }
+        return null;
+      };
+
+      const widSerialized = (wid: unknown): string | null => {
+        if (!wid || typeof wid !== "object") {
+          return typeof wid === "string" ? wid : null;
+        }
+        const record = wid as {
+          _serialized?: string;
+          user?: string;
+          server?: string;
+        };
+        if (typeof record._serialized === "string" && record._serialized) {
+          return record._serialized;
+        }
+        if (record.user && record.server) {
+          return `${record.user}@${record.server}`;
+        }
+        return null;
+      };
+
+      const rememberId = (wid: unknown) => {
+        const serialized = widSerialized(wid);
+        if (serialized && !ids.includes(serialized)) {
+          ids.push(serialized);
+        }
       };
 
       const normalizeWebsiteList = (value: unknown): string[] => {
@@ -1106,11 +1162,11 @@ async function lookupContactMetadata(
         );
 
         return {
-          name: text(next.name) || current?.name || null,
-          pushname: text(next.pushname) || current?.pushname || null,
-          shortName: text(next.shortName) || current?.shortName || null,
+          name: personName(next.name) || current?.name || null,
+          pushname: personName(next.pushname) || current?.pushname || null,
+          shortName: personName(next.shortName) || current?.shortName || null,
           verifiedName:
-            text(next.verifiedName) || current?.verifiedName || null,
+            personName(next.verifiedName) || current?.verifiedName || null,
           about: text(next.about) || current?.about || null,
           isBusiness: Boolean(current?.isBusiness || next.isBusiness),
           isEnterprise: Boolean(current?.isEnterprise || next.isEnterprise),
@@ -1178,10 +1234,16 @@ async function lookupContactMetadata(
         if (wwebjs?.getChat) {
           try {
             const chat = await wwebjs.getChat(`${digits}@c.us`);
-            const chatName =
-              text(chat?.formattedTitle) ||
-              text(chat?.name) ||
-              text(chat?.pushname);
+            const chatContact = chat?.contact as
+              | Record<string, unknown>
+              | undefined;
+            const chatName = firstPersonName(
+              chat?.pushname,
+              chatContact?.pushname,
+              chatContact?.notifyName,
+              chat?.formattedTitle,
+              chat?.name,
+            );
             if (chatName) {
               merged = merge(merged, { pushname: chatName });
             }
@@ -1199,20 +1261,33 @@ async function lookupContactMetadata(
           for (const contact of contacts) {
             const record = contact as {
               userid?: string;
-              id?: { user?: string };
+              id?: { user?: string; _serialized?: string };
+              phoneNumber?: { user?: string; _serialized?: string };
               pushname?: string;
               name?: string;
+              notifyName?: string;
               verifiedName?: string;
               shortName?: string;
             };
-            if (record.userid !== digits && record.id?.user !== digits) {
+            const phoneUser = record.phoneNumber?.user || record.id?.user;
+            const matchesPhone =
+              phoneUser === digits ||
+              record.userid === digits ||
+              record.id?.user === digits;
+            if (!matchesPhone) {
               continue;
             }
+            rememberId(record.id);
+            rememberId(record.phoneNumber);
             merged = merge(merged, {
-              pushname: text(record.pushname),
-              name: text(record.name),
-              verifiedName: text(record.verifiedName),
-              shortName: text(record.shortName),
+              pushname: firstPersonName(
+                record.pushname,
+                record.notifyName,
+                record.name,
+              ),
+              name: personName(record.name),
+              verifiedName: personName(record.verifiedName),
+              shortName: personName(record.shortName),
             });
           }
         } catch {
@@ -1243,6 +1318,8 @@ async function lookupContactMetadata(
               continue;
             }
 
+            rememberId(exists.wid);
+
             if (exists.biz === true) {
               merged = merge(merged, { isBusiness: true });
             }
@@ -1271,10 +1348,16 @@ async function lookupContactMetadata(
         for (const id of ids) {
           try {
             const chat = await wwebjs.getChat(id);
-            const chatName =
-              text(chat?.name) ||
-              text(chat?.formattedTitle) ||
-              text(chat?.pushname);
+            const chatContact = chat?.contact as
+              | Record<string, unknown>
+              | undefined;
+            const chatName = firstPersonName(
+              chat?.pushname,
+              chatContact?.pushname,
+              chatContact?.notifyName,
+              chat?.formattedTitle,
+              chat?.name,
+            );
             if (chatName) {
               merged = merge(merged, { pushname: chatName });
             }
@@ -1339,6 +1422,7 @@ async function lookupContactMetadata(
           getVerifiedName: (contact: unknown) => string;
           getName: (contact: unknown) => string;
           getShortName: (contact: unknown) => string;
+          getNotifyName?: (contact: unknown) => string;
           getIsWAContact: (contact: unknown) => boolean;
           getIsEnterprise: (contact: unknown) => boolean;
         };
@@ -1346,6 +1430,9 @@ async function lookupContactMetadata(
           "WAWebFrontendContactGetters",
         ) as {
           getIsMyContact: (contact: unknown) => boolean;
+          getFormattedName?: (contact: unknown) => string;
+          getDisplayName?: (contact: unknown) => string;
+          getFormattedShortName?: (contact: unknown) => string;
         };
 
         for (const id of ids) {
@@ -1356,11 +1443,39 @@ async function lookupContactMetadata(
               continue;
             }
 
+            const rawContact = contact as Record<string, unknown>;
+            const formattedName =
+              frontendGetters.getFormattedName?.(contact) ||
+              frontendGetters.getDisplayName?.(contact) ||
+              frontendGetters.getFormattedShortName?.(contact);
+            const tildeName =
+              typeof formattedName === "string" &&
+              formattedName.trim().startsWith("~")
+                ? formattedName
+                : null;
+            rememberId(rawContact.id);
+            rememberId(rawContact.phoneNumber);
+
             merged = merge(merged, {
-              name: text(contactGetters.getName(contact)),
-              pushname: text(contactGetters.getPushname(contact)),
-              shortName: text(contactGetters.getShortName(contact)),
-              verifiedName: text(contactGetters.getVerifiedName(contact)),
+              name: firstPersonName(
+                contactGetters.getName(contact),
+                rawContact.name,
+              ),
+              pushname: firstPersonName(
+                contactGetters.getPushname(contact),
+                rawContact.pushname,
+                rawContact.notifyName,
+                contactGetters.getNotifyName?.(contact),
+                tildeName,
+              ),
+              shortName: firstPersonName(
+                contactGetters.getShortName(contact),
+                rawContact.shortName,
+              ),
+              verifiedName: firstPersonName(
+                contactGetters.getVerifiedName(contact),
+                rawContact.verifiedName,
+              ),
               isBusiness: Boolean(contact.isBusiness),
               isEnterprise: contactGetters.getIsEnterprise(contact),
               isWAContact: contactGetters.getIsWAContact(contact),
@@ -1435,6 +1550,313 @@ async function lookupContactMetadata(
         }
       } catch {
         // Status bridge unavailable.
+      }
+
+      if (!merged?.pushname && !merged?.verifiedName && !merged?.name) {
+        try {
+          const collections = win.require("WAWebCollections") as {
+            Chat?: {
+              getModelsArray?: () => Array<Record<string, unknown>>;
+            };
+          };
+          const findChatAction = win.require("WAWebFindChatAction") as {
+            findOrCreateLatestChat?: (
+              wid: unknown,
+            ) => Promise<{ chat?: Record<string, unknown> } | null>;
+          };
+          const widFactory = win.require("WAWebWidFactory") as {
+            createWid: (value: string) => unknown;
+          };
+          const contactGetters = win.require("WAWebContactGetters") as {
+            getPushname?: (contact: unknown) => string;
+            getNotifyName?: (contact: unknown) => string;
+            getName?: (contact: unknown) => string;
+          };
+          const frontendGetters = win.require(
+            "WAWebFrontendContactGetters",
+          ) as {
+            getFormattedName?: (contact: unknown) => string;
+          };
+
+          const wantedUsers = new Set<string>([digits]);
+          for (const id of ids) {
+            const user = id.split("@")[0];
+            if (user) {
+              wantedUsers.add(user);
+            }
+          }
+
+          const readModelName = (
+            model: Record<string, unknown> | null | undefined,
+          ): { pushname: string | null; savedName: string | null } => {
+            if (!model) {
+              return { pushname: null, savedName: null };
+            }
+            const contact = model.contact as
+              | Record<string, unknown>
+              | undefined;
+            const formatted = text(
+              contact
+                ? frontendGetters.getFormattedName?.(contact)
+                : undefined,
+            );
+            const title = text(model.formattedTitle);
+            const tildeSource = [formatted, title].find(
+              (value) => value && value.trim().startsWith("~"),
+            );
+            const savedSource = [title, formatted].find(
+              (value) => value && !value.trim().startsWith("~"),
+            );
+            return {
+              pushname: firstPersonName(
+                contact ? contactGetters.getPushname?.(contact) : null,
+                contact?.pushname,
+                contact?.notifyName,
+                model.pushname,
+                model.notifyName,
+                contact ? contactGetters.getNotifyName?.(contact) : null,
+                tildeSource,
+              ),
+              savedName: firstPersonName(
+                contact ? contactGetters.getName?.(contact) : null,
+                contact?.name,
+                savedSource,
+              ),
+            };
+          };
+
+          const chatMatches = (chat: Record<string, unknown>): boolean => {
+            const id = chat.id as
+              | { user?: string; _serialized?: string }
+              | undefined;
+            const contact = chat.contact as Record<string, unknown> | undefined;
+            const userFrom = (value: unknown): string | null => {
+              if (typeof value === "string") {
+                const user = value.split("@")[0]?.replace(/\D/g, "");
+                return user || null;
+              }
+              if (value && typeof value === "object") {
+                const record = value as { user?: string; _serialized?: string };
+                if (typeof record.user === "string") {
+                  return record.user;
+                }
+                if (typeof record._serialized === "string") {
+                  return record._serialized.split("@")[0] || null;
+                }
+              }
+              return null;
+            };
+            const candidates = [
+              userFrom(id),
+              userFrom(id?._serialized),
+              userFrom(contact?.phoneNumber),
+              userFrom(contact?.id),
+              userFrom(contact?.userid),
+            ];
+            if (
+              candidates.some(
+                (user) => typeof user === "string" && wantedUsers.has(user),
+              )
+            ) {
+              return true;
+            }
+            const titleDigits = String(chat.formattedTitle || "").replace(
+              /\D/g,
+              "",
+            );
+            return titleDigits.length >= 8 && titleDigits.endsWith(digits);
+          };
+
+          for (const id of ids) {
+            if (!id.endsWith("@lid") && !id.endsWith("@c.us")) {
+              continue;
+            }
+            try {
+              const created = await findChatAction.findOrCreateLatestChat?.(
+                widFactory.createWid(id),
+              );
+              const createdName = readModelName(created?.chat);
+              if (createdName.pushname || createdName.savedName) {
+                merged = merge(merged, {
+                  pushname: createdName.pushname,
+                  name: createdName.savedName,
+                });
+              }
+            } catch {
+              // LID chat may not exist until WhatsApp finishes mapping.
+            }
+          }
+
+          const messageList = (
+            chat: Record<string, unknown>,
+          ): Array<Record<string, unknown>> =>
+            (
+              chat.msgs as
+                | { getModelsArray?: () => Array<Record<string, unknown>> }
+                | undefined
+            )?.getModelsArray?.() || [];
+
+          const nameFromMessages = (
+            messages: Array<Record<string, unknown>>,
+          ): string | null => {
+            for (const msg of messages) {
+              const fromMe = Boolean(
+                msg.fromMe ||
+                  (msg.id as { fromMe?: boolean } | undefined)?.fromMe,
+              );
+              if (fromMe) {
+                continue;
+              }
+              const sender = (msg.senderObj || msg.sender) as
+                | Record<string, unknown>
+                | undefined;
+              const notify = firstPersonName(
+                msg.notifyName,
+                msg.pushname,
+                sender?.pushname,
+                sender?.notifyName,
+                sender?.name,
+              );
+              if (notify) {
+                return notify;
+              }
+            }
+            return null;
+          };
+
+          const loadHistoryName = async (
+            chat: Record<string, unknown>,
+          ): Promise<string | null> => {
+            const seen = nameFromMessages(messageList(chat));
+            if (seen) {
+              return seen;
+            }
+            try {
+              const loader = win.require("WAWebChatLoadMessages") as {
+                loadEarlierMsgs?: (args: {
+                  chat: unknown;
+                }) => Promise<Array<Record<string, unknown>> | null>;
+              };
+              for (let page = 0; page < 3; page += 1) {
+                const earlier = await loader.loadEarlierMsgs?.({ chat });
+                if (!earlier || earlier.length === 0) {
+                  break;
+                }
+                const notify = nameFromMessages(earlier);
+                if (notify) {
+                  return notify;
+                }
+              }
+            } catch {
+              // History can be absent for a chat that was only opened locally.
+            }
+            return nameFromMessages(messageList(chat));
+          };
+
+          const readOpenContactTilde = async (
+            chat: Record<string, unknown>,
+          ): Promise<string | null> => {
+            try {
+              const cmd = win.require("WAWebCmd") as {
+                Cmd?: Record<string, unknown>;
+              };
+              const api = cmd.Cmd;
+              const openChat = api?.openChatBottom;
+              if (typeof openChat === "function") {
+                await (openChat as (args: { chat: unknown }) => Promise<void>).call(
+                  api,
+                  { chat },
+                );
+              }
+              const openInfo = api?.chatInfoDrawer;
+              if (typeof openInfo === "function") {
+                await (openInfo as (value: unknown) => Promise<void>).call(
+                  api,
+                  chat,
+                );
+              }
+              await new Promise((resolve) => {
+                setTimeout(resolve, 700);
+              });
+            } catch {
+              return null;
+            }
+
+            const wanted = digits;
+            const nodes = Array.from(document.querySelectorAll("span"));
+            for (const node of nodes) {
+              const raw = node.textContent?.trim() || "";
+              if (!raw.startsWith("~") || node.childNodes.length > 3) {
+                continue;
+              }
+              const candidate = personName(raw);
+              if (!candidate) {
+                continue;
+              }
+              let parent: HTMLElement | null = node.parentElement;
+              for (let depth = 0; depth < 12 && parent; depth += 1) {
+                const parentDigits = (parent.innerText || "").replace(/\D/g, "");
+                if (parentDigits.includes(wanted)) {
+                  return candidate;
+                }
+                parent = parent.parentElement;
+              }
+            }
+            return null;
+          };
+
+          const chats = collections.Chat?.getModelsArray?.() || [];
+          let matchedChat: Record<string, unknown> | null = null;
+          for (const chat of chats) {
+            if (!chatMatches(chat)) {
+              continue;
+            }
+            matchedChat = chat;
+            const chatName = readModelName(chat);
+            if (chatName.pushname || chatName.savedName) {
+              merged = merge(merged, {
+                pushname: chatName.pushname,
+                name: chatName.savedName,
+              });
+            }
+
+            if (!merged?.pushname) {
+              const historyName = await loadHistoryName(chat);
+              if (historyName) {
+                merged = merge(merged, { pushname: historyName });
+              } else {
+                const refreshed = readModelName(chat);
+                if (refreshed.pushname || refreshed.savedName) {
+                  merged = merge(merged, {
+                    pushname: refreshed.pushname,
+                    name: refreshed.savedName,
+                  });
+                }
+              }
+            }
+
+            if (merged?.pushname || merged?.name) {
+              break;
+            }
+          }
+
+          if (!merged?.pushname && !merged?.name && matchedChat) {
+            const tildeName = await readOpenContactTilde(matchedChat);
+            if (tildeName) {
+              merged = merge(merged, { pushname: tildeName });
+            } else {
+              const refreshed = readModelName(matchedChat);
+              if (refreshed.pushname || refreshed.savedName) {
+                merged = merge(merged, {
+                  pushname: refreshed.pushname,
+                  name: refreshed.savedName,
+                });
+              }
+            }
+          }
+        } catch {
+          // Chat list is unavailable in this WhatsApp Web build.
+        }
       }
 
       return merged;
@@ -1678,35 +2100,6 @@ export async function lookupProfileDetails(
       `Contact metadata lookup failed for ${phoneDigits}:`,
       getErrorMessage(error),
     );
-  }
-
-  if (!details.displayName && !details.pushname) {
-    try {
-      const page = (await getWhatsAppClient(accountId)).pupPage;
-      if (page) {
-        const { probePushnameViaProfileView } = await import(
-          "@/lib/profile-probe"
-        );
-        const probe = await probePushnameViaProfileView(
-          page,
-          phoneDigits,
-          picResult.resolvedId,
-        );
-        if (probe.pushname || probe.verifiedName || probe.name) {
-          applyContactMetadata(details, {
-            ...(metadata || {}),
-            pushname: probe.pushname ?? metadata?.pushname ?? null,
-            verifiedName: probe.verifiedName ?? metadata?.verifiedName ?? null,
-            name: probe.name ?? metadata?.name ?? null,
-          });
-        }
-      }
-    } catch (error: unknown) {
-      console.warn(
-        `Profile probe failed for ${phoneDigits}:`,
-        getErrorMessage(error),
-      );
-    }
   }
 
   return details;

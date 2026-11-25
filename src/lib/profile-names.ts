@@ -44,16 +44,25 @@ function isLikelyPhoneOrId(value: string): boolean {
   if (!trimmed) {
     return true;
   }
-  if (/^\+?[\d\s()-]{8,}$/.test(trimmed)) {
+  if (/^\+?[\d\s().-]{8,}$/.test(trimmed)) {
     return true;
   }
   if (/@(c\.us|lid|s\.whatsapp\.net)$/i.test(trimmed)) {
     return true;
   }
-  if (/^\d{8,}$/.test(trimmed)) {
+  if (/^\d{6,}$/.test(trimmed)) {
     return true;
   }
   return false;
+}
+
+/**
+ * WhatsApp chat list prefixes a personal pushname with "~" when the number
+ * is not saved in the phone address book. Business verified names are shown
+ * without that prefix. The tilde is display chrome, not part of the name.
+ */
+export function stripWhatsAppPushnamePrefix(value: string): string {
+  return value.replace(/^\s*~+\s*/, "").trim();
 }
 
 /**
@@ -67,8 +76,8 @@ export function sanitizePersonName(
     return null;
   }
 
-  const normalized = value.replace(/^~+/, "").trim();
-  if (!normalized || normalized.length < 3 || normalized.length > 80) {
+  const normalized = stripWhatsAppPushnamePrefix(value);
+  if (!normalized || normalized.length < 2 || normalized.length > 80) {
     return null;
   }
   if (isLikelyPhoneOrId(normalized)) {

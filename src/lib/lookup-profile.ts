@@ -7,6 +7,7 @@ import {
   type CachedProfile,
   getCachedProfile,
   isCacheComplete,
+  PERSONAL_NAME_LOOKUP_VERSION,
   PROFILE_CACHE_VERSION,
   setCachedProfile,
 } from "@/lib/profile-cache";
@@ -57,6 +58,46 @@ function toCachedProfile(
   };
 }
 
+function hasResolvedPersonName(profile: {
+  displayName?: string | null;
+  pushname?: string | null;
+  verifiedName?: string | null;
+  name?: string | null;
+}): boolean {
+  return Boolean(
+    profile.displayName ||
+      profile.pushname ||
+      profile.verifiedName ||
+      profile.name,
+  );
+}
+
+function shouldReuseStoredProfile(profile: {
+  displayName?: string | null;
+  pushname?: string | null;
+  verifiedName?: string | null;
+  name?: string | null;
+  isBusiness?: boolean;
+  isEnterprise?: boolean;
+  accountType?: string;
+}): boolean {
+  if (hasResolvedPersonName(profile)) {
+    return true;
+  }
+  if (profile.isBusiness || profile.isEnterprise) {
+    return true;
+  }
+  if (
+    profile.accountType === "Business" ||
+    profile.accountType === "Enterprise"
+  ) {
+    return true;
+  }
+  // A personal row with no name is incomplete. WhatsApp often learns the
+  // pushname only after the existing chat history is loaded.
+  return false;
+}
+
 function fromCachedProfile(
   rawPhone: string,
   digits: string,
@@ -90,6 +131,7 @@ function fromCachedProfile(
     businessAddress: cached.businessAddress,
     businessTag: cached.businessTag,
     accountId,
+    nameLookupVersion: PERSONAL_NAME_LOOKUP_VERSION,
     message:
       cached.profilePicUrl === null
         ? "User has no profile picture or privacy settings restrict access"
@@ -132,6 +174,7 @@ function toLookupResult(
     businessAddress: cached.businessAddress,
     businessTag: cached.businessTag,
     accountId,
+    nameLookupVersion: PERSONAL_NAME_LOOKUP_VERSION,
   };
 
   if (!result.url) {
@@ -160,12 +203,17 @@ export async function lookupProfile(
     const cachedDigits = getCachedProfile(digits);
     const cachedRaw = getCachedProfile(rawPhone);
     const cached = cachedDigits !== undefined ? cachedDigits : cachedRaw;
-    if (cached !== undefined && cached !== null && isCacheComplete(cached)) {
+    if (
+      cached !== undefined &&
+      cached !== null &&
+      isCacheComplete(cached) &&
+      shouldReuseStoredProfile(cached)
+    ) {
       return fromCachedProfile(rawPhone, digits, cached, accountId);
     }
 
     const stored = await getStoredProfileLookup(rawPhone, digits);
-    if (stored) {
+    if (stored && shouldReuseStoredProfile(stored)) {
       const hydrated: CachedProfile = {
         cacheVersion: PROFILE_CACHE_VERSION,
         profilePicUrl: stored.profilePicUrl ?? null,
@@ -227,6 +275,7 @@ export async function lookupProfile(
       isBusiness: result.isBusiness,
       isEnterprise: result.isEnterprise,
       accountId,
+      nameLookupVersion: PERSONAL_NAME_LOOKUP_VERSION,
     };
   }
 
